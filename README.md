@@ -13,7 +13,7 @@ tolerance, and operational safety.
 - ✅ Validated environment configuration
 - ✅ Liveness and readiness endpoints
 - ✅ Strict linting, formatting, type checking, and testing
-- 🚧 Tenant-safe chat domain model
+- ✅ Tenant-safe chat domain model and agent-run lifecycle
 - ⏳ PostgreSQL persistence and row-level security
 - ⏳ Idempotent message acceptance and transactional outbox
 - ⏳ Durable agent worker and AI-provider abstraction
@@ -229,6 +229,8 @@ imports; import sorting is performed by `ruff check --fix`.
 │       │   └── health.py
 │       ├── domain/
 │       │   ├── __init__.py
+│       │   ├── agent_run.py
+│       │   ├── chat.py
 │       │   ├── errors.py
 │       │   ├── identifiers.py
 │       │   └── primitives.py
@@ -240,6 +242,8 @@ imports; import sorting is performed by `ruff check --fix`.
     │   └── test_health.py
     ├── unit/
     │   ├── domain/
+    │   │   ├── test_agent_run.py
+    │   │   ├── test_chat.py
     │   │   ├── test_identifiers.py
     │   │   └── test_primitives.py
     │   └── test_settings.py

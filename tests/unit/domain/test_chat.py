@@ -3,10 +3,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from enterprise_chat_platform.domain.agent_run import AgentRunStatus
 from enterprise_chat_platform.domain.chat import (
     MAX_USER_MESSAGE_LENGTH,
     AcceptedUserTurn,
-    AgentRunStatus,
     Conversation,
     ConversationStatus,
     MessageRole,

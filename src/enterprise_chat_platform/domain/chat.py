@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Self
 
+from enterprise_chat_platform.domain.agent_run import AgentRun
 from enterprise_chat_platform.domain.errors import (
     DomainValidationError,
     InvalidStateTransitionError,
@@ -35,14 +36,6 @@ class ConversationStatus(StrEnum):
 class MessageRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
-
-
-class AgentRunStatus(StrEnum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 def _validate_user_message_content(content: str) -> None:
@@ -84,28 +77,6 @@ class Message:
         created_at = normalize_utc(
             self.created_at,
             field_name="message.created_at",
-        )
-        object.__setattr__(self, "created_at", created_at)
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class AgentRun:
-    """An asynchronous agent run created from a user message."""
-
-    id: AgentRunId
-    tenant_id: TenantId
-    conversation_id: ConversationId
-    input_message_id: MessageId
-    created_at: datetime
-    status: AgentRunStatus = field(
-        default=AgentRunStatus.QUEUED,
-        init=False,
-    )
-
-    def __post_init__(self) -> None:
-        created_at = normalize_utc(
-            self.created_at,
-            field_name="agent_run.created_at",
         )
         object.__setattr__(self, "created_at", created_at)
 
