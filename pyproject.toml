@@ -33,7 +33,7 @@ dev = [
 
 [tool.pytest]
 minversion = "9.2"
-addopts = ["-ra"]
+addopts = ["-ra", "-m", "not integration"]
 testpaths = ["tests"]
 strict = true
 filterwarnings = ["error"]
@@ -41,6 +41,9 @@ asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
 asyncio_debug = true
+markers = [
+      "integration: requires local Docker Compose PostgreSQL and performs real external I/O",
+  ]
 
 [tool.ruff]
 target-version = "py312"
