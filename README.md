@@ -14,8 +14,9 @@ tolerance, and operational safety.
 - ✅ Liveness and readiness endpoints
 - ✅ Strict linting, formatting, type checking, and testing
 - ✅ Tenant-safe chat domain model and agent-run lifecycle
-- ⏳ PostgreSQL persistence and row-level security
-- ⏳ Idempotent message acceptance and transactional outbox
+- ✅ User-turn application orchestration and outbox contract
+- ⏳ PostgreSQL persistence, concurrent idempotency, and row-level security
+- ⏳ Transactional outbox relay and durable event delivery
 - ⏳ Durable agent worker and AI-provider abstraction
 - ⏳ Redis-backed realtime delivery and rate limiting
 - ⏳ Production observability, deployment, and recovery
@@ -225,6 +226,10 @@ imports; import sorting is performed by `ruff check --fix`.
 │       └── chat-domain.md
 ├── src/
 │   └── enterprise_chat_platform/
+│       ├── application/
+│       │   ├── __init__.py
+│       │   ├── accept_user_turn.py
+│       │   └── errors.py
 │       ├── api/
 │       │   └── health.py
 │       ├── domain/
@@ -241,6 +246,8 @@ imports; import sorting is performed by `ruff check --fix`.
     ├── api/
     │   └── test_health.py
     ├── unit/
+    │   ├── application/
+    │   │   └── test_accept_user_turn.py
     │   ├── domain/
     │   │   ├── test_agent_run.py
     │   │   ├── test_chat.py
@@ -278,6 +285,13 @@ The chat-domain contract is documented in
 messages, idempotency, conversation ordering, agent-run states, UTC time
 handling, and concurrency boundaries before those rules are encoded in
 persistence models.
+
+The `AcceptUserTurn` application use case coordinates trusted actor context,
+authorization, deterministic request fingerprints, domain behavior, an
+idempotency receipt, and an outbox event behind one unit-of-work contract.
+Its in-memory tests prove sequential replay and definitive rollback behavior.
+Concurrent same-key races, compare-and-swap enforcement, and unknown database
+commit outcomes require the upcoming PostgreSQL adapter and integration tests.
 
 ## Development workflow
 

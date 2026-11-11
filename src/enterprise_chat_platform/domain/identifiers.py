@@ -65,3 +65,9 @@ class AgentRunId(_UUIDIdentifier):
     """Uniquely identifies an agent execution attempt."""
 
     __slots__ = ()
+
+
+class EventId(_UUIDIdentifier):
+    """Uniquely identifiers an application or integration event."""
+
+    __slots__ = ()

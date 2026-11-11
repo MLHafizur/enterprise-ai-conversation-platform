@@ -7,6 +7,7 @@ from enterprise_chat_platform.domain.errors import DomainValidationError
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
     ConversationId,
+    EventId,
     MessageId,
     TenantId,
     UserId,
@@ -38,9 +39,10 @@ def test_identifier_wrappers_remain_distinct_types() -> None:
         ConversationId(value),
         MessageId(value),
         AgentRunId(value),
+        EventId(value),
     )
 
-    assert len(set(identifiers)) == 5
+    assert len(set(identifiers)) == len(identifiers)
 
 
 def test_identifier_is_immutable() -> None:
