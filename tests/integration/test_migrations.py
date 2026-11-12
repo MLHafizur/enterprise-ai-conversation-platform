@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
@@ -111,3 +112,30 @@ async def test_migration_history_is_at_single_protected_head() -> None:
     assert version_schemas == ("chat",)
     assert owner == migration_url.username
     assert runtime_has_any_privilege is False
+
+
+@pytest.mark.integration
+def test_migration_autogenerate_has_no_schema_drift() -> None:
+    runtime_settings = Settings()
+    migration_settings = MigrationSettings()
+
+    runtime_url = make_url(runtime_settings.database_url.get_secret_value())
+    migration_url = make_url(migration_settings.migration_database_url.get_secret_value())
+
+    # Safety guard: never run this integration test remotely.
+    assert runtime_settings.environment in {"local", "test"}
+    assert runtime_url.host in LOOPBACK_HOSTS
+    assert migration_url.host in LOOPBACK_HOSTS
+    assert (
+        migration_url.host,
+        migration_url.port,
+        migration_url.database,
+    ) == (
+        runtime_url.host,
+        runtime_url.port,
+        runtime_url.database,
+    )
+
+    config = Config(PROJECT_ROOT / "alembic.ini")
+
+    command.check(config)

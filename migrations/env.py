@@ -10,9 +10,9 @@ from sqlalchemy import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from enterprise_chat_platform.infrastructure.persistence.metadata import (
-    APP_SCHEMA,
-    Base,
+from enterprise_chat_platform.infrastructure.persistence.metadata import APP_SCHEMA
+from enterprise_chat_platform.infrastructure.persistence.models import (
+    registered_model_metadata,
 )
 from enterprise_chat_platform.settings import MigrationSettings
 
@@ -21,7 +21,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = Base.metadata
+target_metadata = registered_model_metadata()
+VERSION_TABLE = "alembic_version"
 
 type SchemaObjectType = Literal[
     "schema",
@@ -50,12 +51,15 @@ def include_name(
     type_: SchemaObjectType,
     parent_names: MutableMapping[ParentName, str | None],
 ) -> bool:
-    """Limit schema discovery to objects owned by this application."""
+    """Limit reflection to application-owned database objects."""
     if type_ == "schema":
-        return name == APP_SCHEMA
+        # Alembic represents the connection's default schema as None.
+        return name in {None, APP_SCHEMA}
 
     if type_ == "table":
-        return parent_names.get("schema_name") == APP_SCHEMA
+        schema_name = parent_names.get("schema_name")
+
+        return schema_name in {None, APP_SCHEMA} and name != VERSION_TABLE
 
     return True
 
@@ -67,7 +71,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         include_schemas=True,
         include_name=include_name,
-        version_table="alembic_version",
+        version_table=VERSION_TABLE,
         version_table_schema=APP_SCHEMA,
         version_table_pk=True,
         compare_type=True,
@@ -83,12 +87,20 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     """Configure and execute migrations on one synchronous connection view."""
+    default_schema = connection.dialect.default_schema_name
+
+    if default_schema != APP_SCHEMA:
+        raise RuntimeError(
+            "Migration connection must use "
+            f"{APP_SCHEMA!r} as its default schema; "
+            f"received {default_schema!r}"
+        )
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         include_schemas=True,
         include_name=include_name,
-        version_table="alembic_version",
+        version_table=VERSION_TABLE,
         version_table_schema=APP_SCHEMA,
         version_table_pk=True,
         compare_type=True,
