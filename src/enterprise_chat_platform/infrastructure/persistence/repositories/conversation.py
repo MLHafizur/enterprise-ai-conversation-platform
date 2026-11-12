@@ -1,9 +1,12 @@
 """SQLAlchemy repository for tenant-scoped conversations."""
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from enterprise_chat_platform.domain.chat import Conversation
+from enterprise_chat_platform.domain.chat import (
+    Conversation,
+    ConversationStatus,
+)
 from enterprise_chat_platform.domain.identifiers import (
     ConversationId,
     TenantId,
@@ -41,3 +44,40 @@ class SqlAlchemyConversationRepository:
             return None
 
         return conversation_from_record(record)
+
+    async def update_if_version_matches(
+        self,
+        *,
+        expected_version: int,
+        updated_conversation: Conversation,
+    ) -> bool:
+        """Atomically persist mutable fields when the old version matches."""
+        if expected_version < 0:
+            raise ValueError("Expected conversation version cannot be negative")
+
+        if updated_conversation.version != expected_version + 1:
+            raise ValueError(
+                "Updated conversation version must be exactly one greater than the expected version"
+            )
+
+        statement = (
+            update(ConversationRecord)
+            .where(
+                ConversationRecord.tenant_id == updated_conversation.tenant_id.value,
+                ConversationRecord.id == updated_conversation.id.value,
+                ConversationRecord.version == expected_version,
+                ConversationRecord.status == ConversationStatus.ACTIVE.value,
+            )
+            .values(
+                status=updated_conversation.status.value,
+                version=updated_conversation.version,
+                last_message_sequence=(updated_conversation.last_message_sequence),
+                updated_at=updated_conversation.updated_at,
+            )
+            .returning(ConversationRecord.version)
+            .execution_options(synchronize_session="fetch")
+        )
+
+        result = await self._session.execute(statement)
+
+        return result.scalar_one_or_none() is not None
