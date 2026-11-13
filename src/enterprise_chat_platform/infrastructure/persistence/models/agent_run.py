@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     String,
+    UniqueConstraint,
     Uuid,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -110,6 +111,11 @@ class AgentRunRecord(Base):
             ],
             name="fk_agent_runs_output_message",
             ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "conversation_id",
+            "id",
         ),
         CheckConstraint(
             (

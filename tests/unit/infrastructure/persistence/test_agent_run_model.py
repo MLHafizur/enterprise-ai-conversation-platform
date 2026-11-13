@@ -6,6 +6,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     String,
     Table,
+    UniqueConstraint,
     Uuid,
 )
 
@@ -188,3 +189,21 @@ def test_model_registry_exposes_agent_runs_to_migrations() -> None:
 
     assert "chat.agent_runs" in metadata.tables
     assert metadata.tables["chat.agent_runs"] is AgentRunRecord.__table__
+
+
+def test_agent_run_supports_conversation_scoped_receipt_reference() -> None:
+    table = _agent_run_table()
+
+    unique_constraints = {
+        str(constraint.name): tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+    assert unique_constraints == {
+        "uq_agent_runs_tenant_id_conversation_id_id": (
+            "tenant_id",
+            "conversation_id",
+            "id",
+        )
+    }

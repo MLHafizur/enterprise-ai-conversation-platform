@@ -9,6 +9,9 @@ from enterprise_chat_platform.infrastructure.persistence.models.agent_run import
 from enterprise_chat_platform.infrastructure.persistence.models.conversation import (
     ConversationRecord,
 )
+from enterprise_chat_platform.infrastructure.persistence.models.idempotency_receipt import (
+    IdempotencyReceiptRecord,
+)
 from enterprise_chat_platform.infrastructure.persistence.models.message import (
     MessageRecord,
 )
@@ -22,6 +25,7 @@ def registered_model_metadata() -> MetaData:
 __all__ = [
     "AgentRunRecord",
     "ConversationRecord",
+    "IdempotencyReceiptRecord",
     "MessageRecord",
     "registered_model_metadata",
 ]
