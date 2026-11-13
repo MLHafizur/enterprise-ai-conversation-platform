@@ -84,6 +84,11 @@ class MessageRecord(Base):
             "conversation_id",
             "sequence",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "conversation_id",
+            "id",
+        ),
         CheckConstraint(
             (f"role IN ('{MessageRole.USER.value}', '{MessageRole.ASSISTANT.value}')"),
             name="role_valid",

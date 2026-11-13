@@ -3,6 +3,9 @@
 from sqlalchemy import MetaData
 
 from enterprise_chat_platform.infrastructure.persistence.metadata import Base
+from enterprise_chat_platform.infrastructure.persistence.models.agent_run import (
+    AgentRunRecord,
+)
 from enterprise_chat_platform.infrastructure.persistence.models.conversation import (
     ConversationRecord,
 )
@@ -17,6 +20,7 @@ def registered_model_metadata() -> MetaData:
 
 
 __all__ = [
+    "AgentRunRecord",
     "ConversationRecord",
     "MessageRecord",
     "registered_model_metadata",

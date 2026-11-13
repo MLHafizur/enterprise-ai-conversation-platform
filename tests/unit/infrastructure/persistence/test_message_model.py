@@ -109,7 +109,12 @@ def test_message_record_has_tenant_safe_relationships_and_ordering() -> None:
             "tenant_id",
             "conversation_id",
             "sequence",
-        )
+        ),
+        "uq_messages_tenant_id_conversation_id_id": (
+            "tenant_id",
+            "conversation_id",
+            "id",
+        ),
     }
 
 
