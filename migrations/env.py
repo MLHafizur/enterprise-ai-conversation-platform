@@ -23,6 +23,7 @@ if config.config_file_name is not None:
 
 target_metadata = registered_model_metadata()
 VERSION_TABLE = "alembic_version"
+MIGRATION_DEFAULT_SCHEMA = "public"
 
 type SchemaObjectType = Literal[
     "schema",
@@ -51,15 +52,14 @@ def include_name(
     type_: SchemaObjectType,
     parent_names: MutableMapping[ParentName, str | None],
 ) -> bool:
-    """Limit reflection to application-owned database objects."""
+    """Limit reflection to explicitly named application objects."""
     if type_ == "schema":
-        # Alembic represents the connection's default schema as None.
-        return name in {None, APP_SCHEMA}
+        return name == APP_SCHEMA
 
     if type_ == "table":
         schema_name = parent_names.get("schema_name")
 
-        return schema_name in {None, APP_SCHEMA} and name != VERSION_TABLE
+        return schema_name == APP_SCHEMA and name != VERSION_TABLE
 
     return True
 
@@ -89,10 +89,10 @@ def do_run_migrations(connection: Connection) -> None:
     """Configure and execute migrations on one synchronous connection view."""
     default_schema = connection.dialect.default_schema_name
 
-    if default_schema != APP_SCHEMA:
+    if default_schema != MIGRATION_DEFAULT_SCHEMA:
         raise RuntimeError(
             "Migration connection must use "
-            f"{APP_SCHEMA!r} as its default schema; "
+            f"{MIGRATION_DEFAULT_SCHEMA!r} as its neutral default schema; "
             f"received {default_schema!r}"
         )
     context.configure(
@@ -116,6 +116,11 @@ async def run_async_migrations() -> None:
     """Open a short-lived asynchronous connection for the Alembic command."""
     engine = create_async_engine(
         migration_database_url(),
+        connect_args={
+            "server_settings": {
+                "search_path": MIGRATION_DEFAULT_SCHEMA,
+            }
+        },
         poolclass=NullPool,
         hide_parameters=True,
     )
