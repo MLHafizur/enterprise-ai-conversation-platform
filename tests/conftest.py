@@ -4,6 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from enterprise_chat_platform.api.health import check_readiness
 from enterprise_chat_platform.main import create_app
 from enterprise_chat_platform.settings import get_settings
 
@@ -25,9 +26,11 @@ def application(monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
     monkeypatch.setenv("CHAT_SERVICE_NAME", "test-chat-api")
     monkeypatch.setenv("CHAT_LOG_LEVEL", "INFO")
     monkeypatch.setenv("CHAT_DEBUG", "false")
+    monkeypatch.setenv("CHAT_ALLOW_INSECURE_DEVELOPMENT_AUTH", "true")
     monkeypatch.setenv("CHAT_DATABASE_URL", TEST_DATABASE_URL)
 
     app = create_app()
+    app.dependency_overrides[check_readiness] = lambda: True
     yield app
     app.dependency_overrides.clear()
 

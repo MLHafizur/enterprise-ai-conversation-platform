@@ -1,6 +1,7 @@
 """SQLAlchemy repository for tenant-scoped conversations."""
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from enterprise_chat_platform.domain.chat import (
@@ -24,6 +25,40 @@ class SqlAlchemyConversationRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def insert_if_absent(
+        self,
+        *,
+        conversation: Conversation,
+    ) -> bool:
+        """Atomically insert a conversation unless its tenant-scoped ID exists."""
+        self._require_active_transaction(
+            "Conversation provisioning",
+        )
+
+        statement = (
+            insert(ConversationRecord)
+            .values(
+                tenant_id=conversation.tenant_id.value,
+                id=conversation.id.value,
+                created_by=conversation.created_by.value,
+                status=conversation.status.value,
+                version=conversation.version,
+                last_message_sequence=conversation.last_message_sequence,
+                created_at=conversation.created_at,
+                updated_at=conversation.updated_at,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    ConversationRecord.tenant_id,
+                    ConversationRecord.id,
+                ]
+            )
+            .returning(ConversationRecord.id)
+        )
+
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none() is not None
 
     async def get(
         self,
@@ -81,3 +116,10 @@ class SqlAlchemyConversationRepository:
         result = await self._session.execute(statement)
 
         return result.scalar_one_or_none() is not None
+
+    def _require_active_transaction(
+        self,
+        action: str,
+    ) -> None:
+        if not self._session.in_transaction():
+            raise RuntimeError(f"{action} requires an active transaction")

@@ -1,3 +1,5 @@
+from typing import Literal
+
 import pytest
 from pydantic import SecretStr, ValidationError
 
@@ -25,6 +27,11 @@ def test_settings_load_prefixed_environment(
     monkeypatch.setenv("CHAT_LOG_LEVEL", "WARNING")
     monkeypatch.setenv("CHAT_DEBUG", "false")
     monkeypatch.setenv("CHAT_DATABASE_URL", RUNTIME_DATABASE_URL)
+    monkeypatch.setenv("CHAT_AUTH_MODE", "jwt")
+    monkeypatch.setenv("CHAT_JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("CHAT_JWT_KEY", "environment-test-jwt-key")
+    monkeypatch.setenv("CHAT_JWT_ISSUER", "configured-issuer")
+    monkeypatch.setenv("CHAT_JWT_AUDIENCE", "configured-audience")
 
     settings = get_settings()
 
@@ -33,6 +40,12 @@ def test_settings_load_prefixed_environment(
     assert settings.log_level == "WARNING"
     assert settings.debug is False
     assert settings.database_url.get_secret_value() == RUNTIME_DATABASE_URL
+    assert settings.auth_mode == "jwt"
+    assert settings.jwt_algorithm == "HS256"
+    assert settings.jwt_key is not None
+    assert settings.jwt_key.get_secret_value() == "environment-test-jwt-key"
+    assert settings.jwt_issuer == "configured-issuer"
+    assert settings.jwt_audience == "configured-audience"
 
 
 def test_migration_settings_load_prefixed_environment(
@@ -152,3 +165,95 @@ def test_debug_is_rejected_in_production() -> None:
             database_url=SecretStr(RUNTIME_DATABASE_URL),
             _env_file=None,
         )
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_development_authentication_is_rejected_in_deployed_environments(
+    environment: Literal["staging", "production"],
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="JWT authentication is required",
+    ):
+        Settings(
+            environment=environment,
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="development",
+            _env_file=None,
+        )
+
+
+def test_jwt_authentication_requires_a_key() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="JWT key is required",
+    ):
+        Settings(
+            environment="test",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="jwt",
+            jwt_key=None,
+            _env_file=None,
+        )
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_symmetric_jwt_is_rejected_in_deployed_environments(
+    environment: Literal["staging", "production"],
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="requires an asymmetric algorithm",
+    ):
+        Settings(
+            environment=environment,
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="jwt",
+            jwt_algorithm="HS256",
+            jwt_key=SecretStr("test-shared-secret"),
+            _env_file=None,
+        )
+
+
+def test_symmetric_jwt_is_allowed_in_test_environment() -> None:
+    settings = Settings(
+        environment="test",
+        database_url=SecretStr(RUNTIME_DATABASE_URL),
+        auth_mode="jwt",
+        jwt_algorithm="HS256",
+        jwt_key=SecretStr("test-shared-secret"),
+        _env_file=None,
+    )
+
+    assert settings.auth_mode == "jwt"
+    assert settings.jwt_algorithm == "HS256"
+
+
+def test_asymmetric_jwt_is_allowed_in_production() -> None:
+    settings = Settings(
+        environment="production",
+        database_url=SecretStr(RUNTIME_DATABASE_URL),
+        auth_mode="jwt",
+        jwt_algorithm="RS256",
+        jwt_key=SecretStr("public-verification-key"),
+        _env_file=None,
+    )
+
+    assert settings.auth_mode == "jwt"
+    assert settings.jwt_algorithm == "RS256"
+
+
+def test_jwt_key_is_not_exposed() -> None:
+    secret_key = "jwt-key-must-not-appear"
+    settings = Settings(
+        environment="test",
+        database_url=SecretStr(RUNTIME_DATABASE_URL),
+        auth_mode="jwt",
+        jwt_algorithm="HS256",
+        jwt_key=SecretStr(secret_key),
+        _env_file=None,
+    )
+
+    rendered_settings = f"{settings!r}\n{settings.model_dump_json()}"
+
+    assert secret_key not in rendered_settings

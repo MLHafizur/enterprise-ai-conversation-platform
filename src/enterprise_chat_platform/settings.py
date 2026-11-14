@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Annotated, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     AfterValidator,
@@ -79,11 +80,61 @@ class Settings(_BaseSettings):
     ] = "INFO"
     debug: bool = False
     database_url: AsyncPostgresUrl
+    auth_mode: Literal["development", "jwt"] = "development"
+    allow_insecure_development_auth: bool = False
+    jwt_algorithm: Literal["HS256", "RS256", "ES256"] = "RS256"
+    jwt_key: SecretStr | None = None
+    jwt_issuer: str = Field(
+        default="enterprise-chat-platform",
+        min_length=1,
+    )
+    jwt_audience: str = Field(
+        default="enterprise-chat-api",
+        min_length=1,
+    )
+    worker_service_author_id: UUID = UUID("00000000-0000-4000-8000-000000000001")
+    worker_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
+    worker_lease_seconds: int = Field(default=60, ge=2, le=3600)
+    provider_timeout_seconds: int = Field(default=30, ge=1, le=1800)
+    worker_max_attempts: int = Field(default=5, ge=1, le=100)
+    worker_initial_backoff_seconds: float = Field(default=1, gt=0, le=3600)
+    worker_max_backoff_seconds: float = Field(default=60, gt=0, le=86_400)
+    worker_jitter_fraction: float = Field(default=0.2, ge=0, le=1)
+    provider_mode: Literal["disabled", "echo"] = "disabled"
 
     @model_validator(mode="after")
     def validate_environment(self) -> Self:
         if self.environment == "production" and self.debug:
             raise ValueError("Debug mode must be disabled in production")
+
+        is_deployed_environment = self.environment in {"staging", "production"}
+
+        if is_deployed_environment and self.auth_mode != "jwt":
+            raise ValueError("JWT authentication is required in staging and production")
+
+        if is_deployed_environment and self.allow_insecure_development_auth:
+            raise ValueError(
+                "Development authentication opt-in is forbidden in staging and production"
+            )
+
+        if self.auth_mode == "jwt":
+            if self.jwt_key is None or not self.jwt_key.get_secret_value().strip():
+                raise ValueError("JWT key is required when JWT authentication is enabled")
+
+            if is_deployed_environment and self.jwt_algorithm == "HS256":
+                raise ValueError(
+                    "Staging and production JWT authentication requires an asymmetric algorithm"
+                )
+
+        if self.worker_lease_seconds <= self.provider_timeout_seconds:
+            raise ValueError("Worker lease must exceed the provider timeout")
+
+        if self.worker_max_backoff_seconds < self.worker_initial_backoff_seconds:
+            raise ValueError("Worker maximum backoff cannot be shorter than initial backoff")
+
+        if is_deployed_environment and self.provider_mode == "echo":
+            raise ValueError("The Echo chat provider is forbidden in staging and production")
+
         return self
 
 

@@ -1,3 +1,11 @@
+x-runtime-environment: &runtime-environment
+  CHAT_ENVIRONMENT: local
+  CHAT_DEBUG: "false"
+  CHAT_AUTH_MODE: development
+  CHAT_ALLOW_INSECURE_DEVELOPMENT_AUTH: "true"
+  CHAT_PROVIDER_MODE: echo
+  CHAT_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_RUNTIME_USER}:${POSTGRES_RUNTIME_PASSWORD}@postgres:5432/${POSTGRES_APP_DATABASE}"
+
 services:
   postgres:
     image: postgres:18.6-bookworm
@@ -39,6 +47,72 @@ services:
       retries: 15
       start_period: 10s
 
+    stop_grace_period: 30s
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      CHAT_MIGRATION_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_MIGRATOR_USER}:${POSTGRES_MIGRATOR_PASSWORD}@postgres:5432/${POSTGRES_APP_DATABASE}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: runtime
+    init: true
+    restart: unless-stopped
+    environment: *runtime-environment
+    command:
+      [
+        "uvicorn",
+        "enterprise_chat_platform.main:create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--no-access-log",
+      ]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    stop_grace_period: 30s
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    init: true
+    restart: unless-stopped
+    environment: *runtime-environment
+    command: ["enterprise-chat-worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     stop_grace_period: 30s
 
 volumes:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Self
@@ -38,22 +38,28 @@ class MessageRole(StrEnum):
     ASSISTANT = "assistant"
 
 
-def _validate_user_message_content(content: str) -> None:
+def _validate_message_content(
+    content: str,
+    *,
+    role: MessageRole,
+) -> None:
+    label = role.value.capitalize()
+
     if not content.strip():
-        raise DomainValidationError("User message content cannot be blank")
+        raise DomainValidationError(f"{label} message content cannot be blank")
 
     if "\x00" in content:
-        raise DomainValidationError("User message content cannot contain NUL characters")
+        raise DomainValidationError(f"{label} message content cannot contain NUL characters")
 
     if len(content) > MAX_USER_MESSAGE_LENGTH:
         raise DomainValidationError(
-            f"User message content cannot exceed {MAX_USER_MESSAGE_LENGTH} characters"
+            f"{label} message content cannot exceed {MAX_USER_MESSAGE_LENGTH} characters"
         )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Message:
-    """An immutable user-authored message."""
+    """An immutable user- or assistant-authored conversation message."""
 
     id: MessageId
     tenant_id: TenantId
@@ -63,16 +69,16 @@ class Message:
     sequence: int
     idempotency_key: IdempotencyKey
     created_at: datetime
-    role: MessageRole = field(
-        default=MessageRole.USER,
-        init=False,
-    )
+    role: MessageRole = MessageRole.USER
 
     def __post_init__(self) -> None:
         if self.sequence <= 0:
             raise DomainValidationError("Message sequence must be positive")
 
-        _validate_user_message_content(self.content)
+        _validate_message_content(
+            self.content,
+            role=self.role,
+        )
 
         created_at = normalize_utc(
             self.created_at,
@@ -200,6 +206,57 @@ class Conversation:
             agent_run=agent_run,
         )
 
+    def append_assistant_message(
+        self,
+        *,
+        trusted_tenant_id: TenantId,
+        service_author_id: UserId,
+        message_id: MessageId,
+        content: str,
+        idempotency_key: IdempotencyKey,
+        at: datetime,
+    ) -> AcceptedAssistantMessage:
+        """Append a trusted assistant response and advance the aggregate once."""
+        if trusted_tenant_id != self.tenant_id:
+            raise TenantMismatchError("Conversation does not belong to the trusted tenant")
+
+        if self.status is not ConversationStatus.ACTIVE:
+            raise InvalidStateTransitionError(
+                "Archived conversation cannot accept assistant messages"
+            )
+
+        accepted_at = normalize_utc(
+            at,
+            field_name="accepted_at",
+        )
+
+        if accepted_at < self.updated_at:
+            raise DomainValidationError("accepted_at cannot precede conversation updated_at")
+
+        sequence = self.last_message_sequence + 1
+        message = Message(
+            id=message_id,
+            tenant_id=self.tenant_id,
+            conversation_id=self.id,
+            author_id=service_author_id,
+            content=content,
+            sequence=sequence,
+            idempotency_key=idempotency_key,
+            created_at=accepted_at,
+            role=MessageRole.ASSISTANT,
+        )
+        updated_conversation = replace(
+            self,
+            version=self.version + 1,
+            last_message_sequence=sequence,
+            updated_at=accepted_at,
+        )
+
+        return AcceptedAssistantMessage(
+            updated_conversation=updated_conversation,
+            message=message,
+        )
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AcceptedUserTurn:
@@ -230,3 +287,26 @@ class AcceptedUserTurn:
 
         if self.updated_conversation.last_message_sequence != self.message.sequence:
             raise DomainValidationError("Accepted message sequence must match the conversation")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AcceptedAssistantMessage:
+    """The aggregate snapshot and message produced by an assistant response."""
+
+    updated_conversation: Conversation
+    message: Message
+
+    def __post_init__(self) -> None:
+        conversation = self.updated_conversation
+
+        if self.message.role is not MessageRole.ASSISTANT:
+            raise DomainValidationError("Accepted assistant message must use the assistant role")
+
+        if self.message.tenant_id != conversation.tenant_id:
+            raise TenantMismatchError("Assistant message must belong to the conversation tenant")
+
+        if self.message.conversation_id != conversation.id:
+            raise DomainValidationError("Assistant message must reference the conversation")
+
+        if self.message.sequence != conversation.last_message_sequence:
+            raise DomainValidationError("Assistant message sequence must match the conversation")

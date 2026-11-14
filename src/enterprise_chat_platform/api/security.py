@@ -1,0 +1,127 @@
+"""Authentication boundary that creates trusted application actor context."""
+
+from typing import Annotated, cast
+
+import jwt
+from fastapi import Depends, Header, HTTPException, status
+from jwt import PyJWTError
+
+from enterprise_chat_platform.api.dependencies import get_runtime_settings
+from enterprise_chat_platform.application.accept_user_turn import ActorContext
+from enterprise_chat_platform.domain.errors import DomainValidationError
+from enterprise_chat_platform.domain.identifiers import TenantId, UserId
+from enterprise_chat_platform.settings import Settings
+
+_REQUIRED_JWT_CLAIMS = (
+    "exp",
+    "iat",
+    "iss",
+    "aud",
+    "sub",
+    "tenant_id",
+)
+
+
+def _unauthorized() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _parse_actor_ids(*, tenant_id: object, user_id: object) -> ActorContext:
+    if not isinstance(tenant_id, str) or not isinstance(user_id, str):
+        raise _unauthorized()
+
+    try:
+        return ActorContext(
+            tenant_id=TenantId.parse(tenant_id),
+            actor_id=UserId.parse(user_id),
+        )
+    except (DomainValidationError, TypeError):
+        raise _unauthorized() from None
+
+
+def _actor_from_development_headers(
+    *,
+    settings: Settings,
+    tenant_id: str | None,
+    user_id: str | None,
+) -> ActorContext:
+    if (
+        settings.environment not in {"local", "test"}
+        or not settings.allow_insecure_development_auth
+    ):
+        raise _unauthorized()
+
+    return _parse_actor_ids(
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+
+
+def _actor_from_jwt(
+    *,
+    settings: Settings,
+    authorization: str | None,
+) -> ActorContext:
+    if authorization is None:
+        raise _unauthorized()
+
+    authorization_parts = authorization.split()
+
+    if len(authorization_parts) != 2 or authorization_parts[0].lower() != "bearer":
+        raise _unauthorized()
+
+    token = authorization_parts[1]
+    key = settings.jwt_key
+
+    if not token or key is None:
+        raise _unauthorized()
+
+    try:
+        claims = cast(
+            dict[str, object],
+            jwt.decode(
+                token,
+                key.get_secret_value(),
+                algorithms=[settings.jwt_algorithm],
+                audience=settings.jwt_audience,
+                issuer=settings.jwt_issuer,
+                options={"require": list(_REQUIRED_JWT_CLAIMS)},
+            ),
+        )
+    except PyJWTError:
+        raise _unauthorized() from None
+
+    return _parse_actor_ids(
+        tenant_id=claims.get("tenant_id"),
+        user_id=claims.get("sub"),
+    )
+
+
+def get_actor_context(
+    settings: Annotated[Settings, Depends(get_runtime_settings)],
+    authorization: Annotated[str | None, Header()] = None,
+    development_tenant_id: Annotated[
+        str | None,
+        Header(alias="X-Dev-Tenant-Id"),
+    ] = None,
+    development_user_id: Annotated[
+        str | None,
+        Header(alias="X-Dev-User-Id"),
+    ] = None,
+) -> ActorContext:
+    """Authenticate the request and return identity from trusted transport data."""
+    if settings.auth_mode == "development":
+        return _actor_from_development_headers(
+            settings=settings,
+            tenant_id=development_tenant_id,
+            user_id=development_user_id,
+        )
+
+    return _actor_from_jwt(
+        settings=settings,
+        authorization=authorization,
+    )

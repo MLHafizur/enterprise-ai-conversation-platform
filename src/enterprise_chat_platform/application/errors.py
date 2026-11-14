@@ -11,3 +11,7 @@ class ConversationNotFoundError(ApplicationError):
 
 class IdempotencyConflictError(ApplicationError):
     """Raised when an idempotency key is reused for another request."""
+
+
+class ConversationConcurrencyError(ApplicationError):
+    """Raised when another writer changes a conversation first."""

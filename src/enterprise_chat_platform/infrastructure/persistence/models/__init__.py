@@ -15,6 +15,9 @@ from enterprise_chat_platform.infrastructure.persistence.models.idempotency_rece
 from enterprise_chat_platform.infrastructure.persistence.models.message import (
     MessageRecord,
 )
+from enterprise_chat_platform.infrastructure.persistence.models.outbox_event import (
+    OutboxEventRecord,
+)
 
 
 def registered_model_metadata() -> MetaData:
@@ -27,5 +30,6 @@ __all__ = [
     "ConversationRecord",
     "IdempotencyReceiptRecord",
     "MessageRecord",
+    "OutboxEventRecord",
     "registered_model_metadata",
 ]
