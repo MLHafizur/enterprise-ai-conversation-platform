@@ -1,41 +1,69 @@
 x-runtime-environment: &runtime-environment
-  CHAT_ENVIRONMENT: local
-  CHAT_DEBUG: "false"
-  CHAT_AUTH_MODE: development
-  CHAT_ALLOW_INSECURE_DEVELOPMENT_AUTH: "true"
-  CHAT_PROVIDER_MODE: echo
+  CHAT_ENVIRONMENT: "${CHAT_ENVIRONMENT:-local}"
+  CHAT_SERVICE_NAME: "${CHAT_SERVICE_NAME:-enterprise-chat-api}"
+  CHAT_LOG_LEVEL: "${CHAT_LOG_LEVEL:-INFO}"
+  CHAT_DEBUG: "${CHAT_DEBUG:-false}"
+  CHAT_AUTH_MODE: "${CHAT_AUTH_MODE:-jwt}"
+  CHAT_ALLOW_INSECURE_DEVELOPMENT_AUTH: "${CHAT_ALLOW_INSECURE_DEVELOPMENT_AUTH:-false}"
+  CHAT_DEMO_AUTH_ENABLED: "${CHAT_DEMO_AUTH_ENABLED:-true}"
+  CHAT_ACCESS_TOKEN_EXPIRE_MINUTES: "${CHAT_ACCESS_TOKEN_EXPIRE_MINUTES:-480}"
+  CHAT_JWT_ALGORITHM: "${CHAT_JWT_ALGORITHM:-HS256}"
+  CHAT_JWT_KEY: "${CHAT_JWT_KEY:?set CHAT_JWT_KEY in .env}"
+  CHAT_JWT_ISSUER: "${CHAT_JWT_ISSUER:-enterprise-chat-platform}"
+  CHAT_JWT_AUDIENCE: "${CHAT_JWT_AUDIENCE:-enterprise-chat-api}"
   CHAT_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_RUNTIME_USER}:${POSTGRES_RUNTIME_PASSWORD}@postgres:5432/${POSTGRES_APP_DATABASE}"
+  CHAT_REALTIME_ENABLED: "${CHAT_REALTIME_ENABLED:-true}"
+  CHAT_REDIS_URL: "${CHAT_REDIS_URL:-redis://redis:6379/0}"
+  CHAT_WEBSOCKET_AUTH_TIMEOUT_SECONDS: "${CHAT_WEBSOCKET_AUTH_TIMEOUT_SECONDS:-10}"
+  CHAT_WEBSOCKET_MAX_MESSAGE_BYTES: "${CHAT_WEBSOCKET_MAX_MESSAGE_BYTES:-32768}"
+  CHAT_WEBSOCKET_ALLOWED_ORIGINS: "${CHAT_WEBSOCKET_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}"
+  CHAT_CONNECTION_LEASE_SECONDS: "${CHAT_CONNECTION_LEASE_SECONDS:-90}"
+  CHAT_PER_USER_MESSAGES_PER_MINUTE: "${CHAT_PER_USER_MESSAGES_PER_MINUTE:-10}"
+  CHAT_REALTIME_RELAY_POLL_INTERVAL_SECONDS: "${CHAT_REALTIME_RELAY_POLL_INTERVAL_SECONDS:-0.5}"
+  CHAT_REALTIME_RELAY_LEASE_SECONDS: "${CHAT_REALTIME_RELAY_LEASE_SECONDS:-30}"
+  CHAT_REALTIME_RELAY_INITIAL_BACKOFF_SECONDS: "${CHAT_REALTIME_RELAY_INITIAL_BACKOFF_SECONDS:-1}"
+  CHAT_REALTIME_RELAY_MAX_BACKOFF_SECONDS: "${CHAT_REALTIME_RELAY_MAX_BACKOFF_SECONDS:-30}"
+  CHAT_PROVIDER_MODE: "${CHAT_PROVIDER_MODE:-echo}"
+  CHAT_GEMINI_API_KEY: "${CHAT_GEMINI_API_KEY:-}"
+  CHAT_GEMINI_MODEL: "${CHAT_GEMINI_MODEL:-gemini-2.5-flash}"
+  CHAT_GEMINI_API_BASE_URL: "${CHAT_GEMINI_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}"
+  CHAT_WORKER_SERVICE_AUTHOR_ID: "${CHAT_WORKER_SERVICE_AUTHOR_ID:-00000000-0000-4000-8000-000000000001}"
+  CHAT_WORKER_POLL_INTERVAL_SECONDS: "${CHAT_WORKER_POLL_INTERVAL_SECONDS:-0.5}"
+  CHAT_WORKER_LEASE_SECONDS: "${CHAT_WORKER_LEASE_SECONDS:-60}"
+  CHAT_PROVIDER_TIMEOUT_SECONDS: "${CHAT_PROVIDER_TIMEOUT_SECONDS:-30}"
+  CHAT_WORKER_MAX_ATTEMPTS: "${CHAT_WORKER_MAX_ATTEMPTS:-5}"
+  CHAT_WORKER_INITIAL_BACKOFF_SECONDS: "${CHAT_WORKER_INITIAL_BACKOFF_SECONDS:-1}"
+  CHAT_WORKER_MAX_BACKOFF_SECONDS: "${CHAT_WORKER_MAX_BACKOFF_SECONDS:-60}"
+  CHAT_WORKER_JITTER_FRACTION: "${CHAT_WORKER_JITTER_FRACTION:-0.2}"
+
+x-runtime-build: &runtime-build
+  context: .
+  target: runtime
 
 services:
   postgres:
     image: postgres:18.6-bookworm
     restart: unless-stopped
-
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: "${POSTGRES_BOOTSTRAP_USER:?set POSTGRES_BOOTSTRAP_USER in .env}"
       POSTGRES_PASSWORD: "${POSTGRES_BOOTSTRAP_PASSWORD:?set POSTGRES_BOOTSTRAP_PASSWORD in .env}"
       POSTGRES_HOST_AUTH_METHOD: scram-sha-256
-
       POSTGRES_APP_DATABASE: "${POSTGRES_APP_DATABASE:?set POSTGRES_APP_DATABASE in .env}"
       POSTGRES_APP_SCHEMA: "${POSTGRES_APP_SCHEMA:?set POSTGRES_APP_SCHEMA in .env}"
-
       POSTGRES_MIGRATOR_USER: "${POSTGRES_MIGRATOR_USER:?set POSTGRES_MIGRATOR_USER in .env}"
       POSTGRES_MIGRATOR_PASSWORD: "${POSTGRES_MIGRATOR_PASSWORD:?set POSTGRES_MIGRATOR_PASSWORD in .env}"
-
       POSTGRES_RUNTIME_USER: "${POSTGRES_RUNTIME_USER:?set POSTGRES_RUNTIME_USER in .env}"
       POSTGRES_RUNTIME_PASSWORD: "${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD in .env}"
-
       TZ: UTC
       PGTZ: UTC
-
     ports:
-      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
-
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_HOST_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
-
+    networks:
+      - backend
     healthcheck:
       test:
         [
@@ -46,13 +74,24 @@ services:
       timeout: 5s
       retries: 15
       start_period: 10s
-
     stop_grace_period: 30s
 
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    stop_grace_period: 10s
+
   migrate:
-    build:
-      context: .
-      target: runtime
+    build: *runtime-build
     restart: "no"
     command: ["alembic", "upgrade", "head"]
     environment:
@@ -60,11 +99,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - backend
 
   api:
-    build:
-      context: .
-      target: runtime
+    build: *runtime-build
     init: true
     restart: unless-stopped
     environment: *runtime-environment
@@ -79,13 +118,18 @@ services:
         "8000",
         "--no-access-log",
       ]
-    ports:
-      - "127.0.0.1:8000:8000"
+    expose:
+      - "8000"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks:
+      - edge
+      - backend
     healthcheck:
       test:
         [
@@ -96,14 +140,12 @@ services:
         ]
       interval: 5s
       timeout: 3s
-      retries: 10
-      start_period: 5s
+      retries: 20
+      start_period: 10s
     stop_grace_period: 30s
 
   worker:
-    build:
-      context: .
-      target: runtime
+    build: *runtime-build
     init: true
     restart: unless-stopped
     environment: *runtime-environment
@@ -113,7 +155,62 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    networks:
+      - backend
     stop_grace_period: 30s
+
+  relay:
+    build: *runtime-build
+    init: true
+    restart: unless-stopped
+    environment: *runtime-environment
+    command: ["enterprise-chat-relay"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - backend
+    stop_grace_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        REACT_APP_API_BASE_URL: /api
+        REACT_APP_WS_BASE_URL: ""
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${APP_BIND_HOST:-127.0.0.1}:${APP_PORT:-3000}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:8080/healthz",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    stop_grace_period: 10s
+
+networks:
+  edge:
+  backend:
 
 volumes:
   postgres_data:

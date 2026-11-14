@@ -7,7 +7,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
+from redis.exceptions import RedisError
 
+from enterprise_chat_platform.api.dependencies import get_optional_tenant_service
 from enterprise_chat_platform.api.security import get_actor_context
 from enterprise_chat_platform.application.accept_user_turn import (
     AcceptUserTurnCommand,
@@ -19,12 +21,14 @@ from enterprise_chat_platform.application.errors import (
     ConversationNotFoundError,
     IdempotencyConflictError,
 )
+from enterprise_chat_platform.application.tenant_catalog import find_tenant
 from enterprise_chat_platform.domain.errors import DomainError
 from enterprise_chat_platform.domain.identifiers import ConversationId
 from enterprise_chat_platform.domain.primitives import IdempotencyKey
 from enterprise_chat_platform.infrastructure.persistence.unit_of_work import (
     SqlAlchemyAcceptUserTurnUnitOfWork,
 )
+from enterprise_chat_platform.infrastructure.realtime.tenant_service import RedisTenantService
 from enterprise_chat_platform.infrastructure.runtime_adapters import (
     OwnerOnlyConversationWriteAuthorizer,
     UtcSystemClock,
@@ -42,6 +46,7 @@ type TurnErrorCode = Literal[
     "idempotency_conflict",
     "conversation_conflict",
     "invalid_turn",
+    "quota_exceeded",
 ]
 
 
@@ -136,6 +141,7 @@ def _turn_error(
         status.HTTP_404_NOT_FOUND: {"model": TurnErrorResponse},
         status.HTTP_409_CONFLICT: {"model": TurnErrorResponse},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": TurnErrorResponse},
+        status.HTTP_429_TOO_MANY_REQUESTS: {"model": TurnErrorResponse},
     },
 )
 async def accept_user_turn(
@@ -147,6 +153,10 @@ async def accept_user_turn(
         AcceptUserTurnHandler,
         Depends(get_accept_user_turn_handler),
     ],
+    tenant_service: Annotated[
+        RedisTenantService | None,
+        Depends(get_optional_tenant_service),
+    ],
 ) -> AcceptUserTurnResponse:
     """Accept one user message without trusting identity from client JSON."""
     try:
@@ -155,6 +165,24 @@ async def accept_user_turn(
             content=request_body.content,
             idempotency_key=IdempotencyKey(idempotency_key),
         )
+
+        tenant = find_tenant(actor.tenant_id)
+        if tenant_service is not None and tenant is not None:
+            try:
+                quota = await tenant_service.reserve_message_quota(
+                    tenant=tenant,
+                    user_id=actor.actor_id,
+                    idempotency_key=idempotency_key,
+                )
+            except RedisError:
+                quota = None
+            if quota is not None and not quota.allowed:
+                raise _turn_error(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code="quota_exceeded",
+                    message="Message quota exceeded",
+                )
+
         result = await handler.handle(
             actor=actor,
             command=command,

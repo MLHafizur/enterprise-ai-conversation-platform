@@ -257,3 +257,146 @@ def test_jwt_key_is_not_exposed() -> None:
     rendered_settings = f"{settings!r}\n{settings.model_dump_json()}"
 
     assert secret_key not in rendered_settings
+
+
+def test_demo_authentication_requires_local_symmetric_jwt() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Demo authentication requires JWT authentication mode",
+    ):
+        Settings(
+            environment="test",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            demo_auth_enabled=True,
+            _env_file=None,
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="Demo authentication requires the local HS256 algorithm",
+    ):
+        Settings(
+            environment="test",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="jwt",
+            jwt_algorithm="RS256",
+            jwt_key=SecretStr("verification-key"),
+            demo_auth_enabled=True,
+            _env_file=None,
+        )
+
+
+def test_demo_authentication_is_forbidden_when_deployed() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Demo authentication is forbidden",
+    ):
+        Settings(
+            environment="production",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="jwt",
+            jwt_algorithm="RS256",
+            jwt_key=SecretStr("verification-key"),
+            demo_auth_enabled=True,
+            _env_file=None,
+        )
+
+
+def test_realtime_requires_jwt_and_an_origin_allowlist() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Realtime WebSockets require JWT authentication mode",
+    ):
+        Settings(
+            environment="test",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            realtime_enabled=True,
+            _env_file=None,
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="at least one allowed origin",
+    ):
+        Settings(
+            environment="test",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="jwt",
+            jwt_algorithm="HS256",
+            jwt_key=SecretStr("test-shared-secret"),
+            realtime_enabled=True,
+            websocket_allowed_origins=" , ",
+            _env_file=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "javascript:alert(1)",
+        "https://user:password@example.test",
+        "https://example.test/path",
+        "https://example.test?query=value",
+        "https://example.test:not-a-port",
+    ],
+)
+def test_invalid_websocket_origins_are_rejected(origin: str) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="valid HTTP origins",
+    ):
+        Settings(
+            environment="test",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="jwt",
+            jwt_algorithm="HS256",
+            jwt_key=SecretStr("test-shared-secret"),
+            realtime_enabled=True,
+            websocket_allowed_origins=origin,
+            _env_file=None,
+        )
+
+
+def test_websocket_origins_are_normalized_and_deployed_wildcards_are_rejected() -> None:
+    local_settings = Settings(
+        environment="test",
+        database_url=SecretStr(RUNTIME_DATABASE_URL),
+        auth_mode="jwt",
+        jwt_algorithm="HS256",
+        jwt_key=SecretStr("test-shared-secret"),
+        realtime_enabled=True,
+        websocket_allowed_origins=" https://example.test/ , * ",
+        _env_file=None,
+    )
+
+    assert local_settings.allowed_websocket_origins == {"https://example.test", "*"}
+
+    with pytest.raises(
+        ValidationError,
+        match="Wildcard WebSocket origins are forbidden",
+    ):
+        Settings(
+            environment="production",
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            auth_mode="jwt",
+            jwt_algorithm="RS256",
+            jwt_key=SecretStr("verification-key"),
+            realtime_enabled=True,
+            websocket_allowed_origins="*",
+            _env_file=None,
+        )
+
+
+def test_invalid_redis_url_is_rejected_without_exposing_credentials() -> None:
+    secret = "redis-password-must-not-appear"
+
+    with pytest.raises(ValidationError) as captured_error:
+        Settings(
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            redis_url=SecretStr(f"redis://default:{secret}@localhost:not-a-port/0"),
+            _env_file=None,
+        )
+
+    rendered_error = str(captured_error.value)
+    assert "Redis URL must be a valid URL" in rendered_error
+    assert secret not in rendered_error

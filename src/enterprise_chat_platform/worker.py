@@ -7,13 +7,17 @@ import logging
 import signal
 from datetime import timedelta
 
+import httpx
+
 from enterprise_chat_platform.application.process_agent_run import (
     AgentRunWorkerConfig,
     AgentRunWorkResult,
+    ChatProvider,
     ProcessAgentRunWorker,
 )
 from enterprise_chat_platform.domain.identifiers import MessageId, UserId
 from enterprise_chat_platform.infrastructure.chat_provider import EchoChatProvider
+from enterprise_chat_platform.infrastructure.gemini_provider import GeminiChatProvider
 from enterprise_chat_platform.infrastructure.persistence.agent_run_job_store import (
     SqlAlchemyAgentRunJobStore,
 )
@@ -46,11 +50,34 @@ def _worker_config(settings: Settings) -> AgentRunWorkerConfig:
     )
 
 
-def _chat_provider(settings: Settings) -> EchoChatProvider:
+def _chat_provider(
+    settings: Settings,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> ChatProvider:
     """Fail closed unless an explicitly enabled provider adapter is available."""
-    if settings.provider_mode != "echo":
-        raise RuntimeError("No chat provider is enabled for this worker")
-    return EchoChatProvider()
+    if settings.provider_mode == "echo":
+        return EchoChatProvider()
+    if settings.provider_mode == "gemini":
+        if http_client is None:
+            raise RuntimeError("Gemini chat provider requires an HTTP client")
+        key = settings.gemini_api_key
+        if key is None:
+            raise RuntimeError("Validated Gemini provider is missing its API key")
+        return GeminiChatProvider(
+            client=http_client,
+            api_key=key.get_secret_value(),
+            model=settings.gemini_model,
+            timeout_seconds=settings.provider_timeout_seconds,
+            api_base_url=settings.gemini_api_base_url,
+            transient_transport_errors=(
+                TimeoutError,
+                OSError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+            ),
+        )
+    raise RuntimeError("No chat provider is enabled for this worker")
 
 
 async def run_worker(
@@ -73,9 +100,10 @@ async def run_worker(
 
     engine = create_database_engine(resolved_settings)
     session_factory = create_session_factory(engine)
+    http_client = httpx.AsyncClient() if resolved_settings.provider_mode == "gemini" else None
     worker = ProcessAgentRunWorker(
         store=SqlAlchemyAgentRunJobStore(session_factory),
-        provider=_chat_provider(resolved_settings),
+        provider=_chat_provider(resolved_settings, http_client=http_client),
         clock=UtcSystemClock(),
         ids=UuidWorkerIds(),
         service_author_id=UserId(resolved_settings.worker_service_author_id),
@@ -102,6 +130,8 @@ async def run_worker(
                 except TimeoutError:
                     pass
     finally:
+        if http_client is not None:
+            await http_client.aclose()
         await engine.dispose()
         logger.info("agent worker stopped")
 

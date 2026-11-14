@@ -1,5 +1,6 @@
-"""Authentication boundary that creates trusted application actor context."""
+"""Authentication boundary shared by HTTP and WebSocket transports."""
 
+from dataclasses import dataclass
 from typing import Annotated, cast
 
 import jwt
@@ -20,6 +21,14 @@ _REQUIRED_JWT_CLAIMS = (
     "sub",
     "tenant_id",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedPrincipal:
+    """Trusted identity and optional role claims extracted from one JWT."""
+
+    actor: ActorContext
+    roles: frozenset[str]
 
 
 def _unauthorized() -> HTTPException:
@@ -61,20 +70,12 @@ def _actor_from_development_headers(
     )
 
 
-def _actor_from_jwt(
+def authenticate_access_token(
     *,
     settings: Settings,
-    authorization: str | None,
-) -> ActorContext:
-    if authorization is None:
-        raise _unauthorized()
-
-    authorization_parts = authorization.split()
-
-    if len(authorization_parts) != 2 or authorization_parts[0].lower() != "bearer":
-        raise _unauthorized()
-
-    token = authorization_parts[1]
+    token: str,
+) -> AuthenticatedPrincipal:
+    """Validate a raw bearer token without trusting transport-supplied identity."""
     key = settings.jwt_key
 
     if not token or key is None:
@@ -95,10 +96,43 @@ def _actor_from_jwt(
     except PyJWTError:
         raise _unauthorized() from None
 
-    return _parse_actor_ids(
+    actor = _parse_actor_ids(
         tenant_id=claims.get("tenant_id"),
         user_id=claims.get("sub"),
     )
+    raw_roles = claims.get("roles", [])
+    if (
+        not isinstance(raw_roles, list)
+        or len(raw_roles) > 32
+        or any(
+            not isinstance(role, str) or not role or role != role.strip() or len(role) > 128
+            for role in raw_roles
+        )
+    ):
+        raise _unauthorized()
+    return AuthenticatedPrincipal(
+        actor=actor,
+        roles=frozenset(cast(list[str], raw_roles)),
+    )
+
+
+def _actor_from_jwt(
+    *,
+    settings: Settings,
+    authorization: str | None,
+) -> ActorContext:
+    if authorization is None:
+        raise _unauthorized()
+
+    authorization_parts = authorization.split()
+
+    if len(authorization_parts) != 2 or authorization_parts[0].lower() != "bearer":
+        raise _unauthorized()
+
+    return authenticate_access_token(
+        settings=settings,
+        token=authorization_parts[1],
+    ).actor
 
 
 def get_actor_context(

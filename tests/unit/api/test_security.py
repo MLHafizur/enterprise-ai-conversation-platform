@@ -22,6 +22,7 @@ USER_ID = "22222222-2222-4222-8222-222222222222"
 JWT_KEY = "unit-test-signing-key-with-enough-entropy-for-all-hmac-tests-1234"
 JWT_ISSUER = "unit-test-issuer"
 JWT_AUDIENCE = "unit-test-audience"
+_MISSING = object()
 
 
 def _settings(
@@ -66,6 +67,7 @@ def _jwt_token(
     subject: object = USER_ID,
     tenant_id: object = TENANT_ID,
     expired: bool = False,
+    roles: object = _MISSING,
 ) -> str:
     issued_at = datetime.now(UTC)
     claims: dict[str, object] = {
@@ -76,6 +78,9 @@ def _jwt_token(
         "sub": subject,
         "tenant_id": tenant_id,
     }
+
+    if roles is not _MISSING:
+        claims["roles"] = roles
 
     if remove_claim is not None:
         claims.pop(remove_claim)
@@ -241,6 +246,34 @@ def test_development_headers_are_ignored_in_jwt_mode() -> None:
                 "X-Dev-Tenant-Id": TENANT_ID,
                 "X-Dev-User-Id": USER_ID,
             },
+        )
+
+    _assert_generic_unauthorized(
+        response.text,
+        response.status_code,
+        response.headers["WWW-Authenticate"],
+    )
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        "admin",
+        [""],
+        [" user"],
+        [123],
+        ["x" * 129],
+        ["user"] * 33,
+    ],
+)
+def test_malformed_jwt_roles_are_rejected(roles: object) -> None:
+    application = _application(_settings(auth_mode="jwt"))
+    token = _jwt_token(roles=roles)
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/protected",
+            headers={"Authorization": f"Bearer {token}"},
         )
 
     _assert_generic_unauthorized(

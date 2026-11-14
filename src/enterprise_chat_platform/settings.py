@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Annotated, Literal, Self
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import (
@@ -52,6 +53,29 @@ type AsyncPostgresUrl = Annotated[
 ]
 
 
+def _validate_redis_url(value: SecretStr) -> SecretStr:
+    try:
+        parsed = urlsplit(value.get_secret_value())
+        _ = parsed.port
+    except ValueError:
+        raise ValueError("Redis URL must be a valid URL") from None
+
+    if parsed.scheme not in {"redis", "rediss"}:
+        raise ValueError("Redis URL must use the redis or rediss scheme")
+    if parsed.hostname is None:
+        raise ValueError("Redis URL must include a host")
+    if parsed.fragment:
+        raise ValueError("Redis URL cannot include a fragment")
+    return value
+
+
+type RedisUrl = Annotated[
+    SecretStr,
+    AfterValidator(_validate_redis_url),
+    BeforeValidator(_mask_secret_input),
+]
+
+
 class _BaseSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -92,6 +116,21 @@ class Settings(_BaseSettings):
         default="enterprise-chat-api",
         min_length=1,
     )
+    demo_auth_enabled: bool = False
+    access_token_expire_minutes: int = Field(default=480, ge=1, le=1440)
+
+    realtime_enabled: bool = False
+    redis_url: RedisUrl = SecretStr("redis://127.0.0.1:6379/0")
+    websocket_auth_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    websocket_max_message_bytes: int = Field(default=32_768, ge=1024, le=1_048_576)
+    websocket_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    connection_lease_seconds: int = Field(default=90, ge=10, le=3600)
+    per_user_messages_per_minute: int = Field(default=10, ge=1, le=10_000)
+    realtime_relay_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
+    realtime_relay_lease_seconds: int = Field(default=30, ge=2, le=3600)
+    realtime_relay_initial_backoff_seconds: float = Field(default=1, gt=0, le=3600)
+    realtime_relay_max_backoff_seconds: float = Field(default=30, gt=0, le=86_400)
+
     worker_service_author_id: UUID = UUID("00000000-0000-4000-8000-000000000001")
     worker_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
     worker_lease_seconds: int = Field(default=60, ge=2, le=3600)
@@ -100,7 +139,46 @@ class Settings(_BaseSettings):
     worker_initial_backoff_seconds: float = Field(default=1, gt=0, le=3600)
     worker_max_backoff_seconds: float = Field(default=60, gt=0, le=86_400)
     worker_jitter_fraction: float = Field(default=0.2, ge=0, le=1)
-    provider_mode: Literal["disabled", "echo"] = "disabled"
+    provider_mode: Literal["disabled", "echo", "gemini"] = "disabled"
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = Field(
+        default="gemini-2.5-flash",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+
+    @property
+    def allowed_websocket_origins(self) -> frozenset[str]:
+        """Return the normalized origin allowlist used during WS upgrades."""
+        return frozenset(
+            origin.strip().rstrip("/")
+            for origin in self.websocket_allowed_origins.split(",")
+            if origin.strip()
+        )
+
+    @staticmethod
+    def _validate_websocket_origin(origin: str) -> None:
+        if origin == "*":
+            return
+
+        try:
+            parsed = urlsplit(origin)
+            _ = parsed.port
+        except ValueError:
+            raise ValueError("WebSocket origins must be valid HTTP origins") from None
+
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("WebSocket origins must be valid HTTP origins")
 
     @model_validator(mode="after")
     def validate_environment(self) -> Self:
@@ -117,6 +195,15 @@ class Settings(_BaseSettings):
                 "Development authentication opt-in is forbidden in staging and production"
             )
 
+        if is_deployed_environment and self.demo_auth_enabled:
+            raise ValueError("Demo authentication is forbidden in staging and production")
+
+        if self.demo_auth_enabled:
+            if self.auth_mode != "jwt":
+                raise ValueError("Demo authentication requires JWT authentication mode")
+            if self.jwt_algorithm != "HS256":
+                raise ValueError("Demo authentication requires the local HS256 algorithm")
+
         if self.auth_mode == "jwt":
             if self.jwt_key is None or not self.jwt_key.get_secret_value().strip():
                 raise ValueError("JWT key is required when JWT authentication is enabled")
@@ -132,8 +219,32 @@ class Settings(_BaseSettings):
         if self.worker_max_backoff_seconds < self.worker_initial_backoff_seconds:
             raise ValueError("Worker maximum backoff cannot be shorter than initial backoff")
 
+        if self.realtime_relay_max_backoff_seconds < self.realtime_relay_initial_backoff_seconds:
+            raise ValueError("Relay maximum backoff cannot be shorter than initial backoff")
+
+        if self.realtime_relay_lease_seconds <= self.realtime_relay_poll_interval_seconds:
+            raise ValueError("Relay lease must exceed its polling interval")
+
+        if self.realtime_enabled and self.auth_mode != "jwt":
+            raise ValueError("Realtime WebSockets require JWT authentication mode")
+
+        if self.realtime_enabled and not self.allowed_websocket_origins:
+            raise ValueError("Realtime WebSockets require at least one allowed origin")
+
+        for origin in self.allowed_websocket_origins:
+            self._validate_websocket_origin(origin)
+
+        if is_deployed_environment and "*" in self.allowed_websocket_origins:
+            raise ValueError("Wildcard WebSocket origins are forbidden when deployed")
+
         if is_deployed_environment and self.provider_mode == "echo":
             raise ValueError("The Echo chat provider is forbidden in staging and production")
+
+        if self.provider_mode == "gemini":
+            if self.gemini_api_key is None or not self.gemini_api_key.get_secret_value().strip():
+                raise ValueError("Gemini API key is required when Gemini is enabled")
+            if not self.gemini_api_base_url.startswith("https://"):
+                raise ValueError("Gemini API base URL must use HTTPS")
 
         return self
 

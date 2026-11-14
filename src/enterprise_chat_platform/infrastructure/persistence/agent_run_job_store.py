@@ -14,6 +14,12 @@ from enterprise_chat_platform.application.accept_user_turn import (
 )
 from enterprise_chat_platform.application.errors import ConversationConcurrencyError
 from enterprise_chat_platform.application.process_agent_run import ClaimedAgentRun
+from enterprise_chat_platform.application.realtime_events import (
+    AGENT_RUN_TERMINAL_EVENT_TYPE,
+    AGENT_RUN_TERMINAL_SCHEMA_VERSION,
+    AgentRunTerminalEvent,
+    agent_run_terminal_payload,
+)
 from enterprise_chat_platform.domain.agent_run import (
     AgentRun,
     AgentRunFailure,
@@ -43,6 +49,9 @@ from enterprise_chat_platform.infrastructure.persistence.models import (
     ConversationRecord,
     MessageRecord,
     OutboxEventRecord,
+)
+from enterprise_chat_platform.infrastructure.persistence.models.outbox_event import (
+    OUTBOX_AGGREGATE_TYPE,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.conversation import (
     SqlAlchemyConversationRepository,
@@ -194,6 +203,22 @@ class SqlAlchemyAgentRunJobStore:
                     at=max(effective_time, run.started_at or effective_time),
                 )
                 _apply_run_snapshot(record=run_record, run=succeeded)
+                session.add(
+                    _terminal_notification_record(
+                        event=AgentRunTerminalEvent(
+                            id=EventId.new(),
+                            tenant_id=job.tenant_id,
+                            conversation_id=job.conversation_id,
+                            agent_run_id=job.agent_run_id,
+                            status=succeeded.status,
+                            output_message_id=output_message_id,
+                            conversation_version=(assistant_message.updated_conversation.version),
+                            message_sequence=assistant_message.message.sequence,
+                            occurred_at=effective_time,
+                        ),
+                        aggregate_version=event_record.aggregate_version,
+                    )
+                )
                 _publish_event(event_record, at=effective_time)
                 await session.flush()
                 return True
@@ -269,8 +294,27 @@ class SqlAlchemyAgentRunJobStore:
                         at=effective_time,
                     )
                     _apply_run_snapshot(record=run_record, run=run)
+                    session.add(
+                        _terminal_notification_record(
+                            event=AgentRunTerminalEvent(
+                                id=EventId.new(),
+                                tenant_id=job.tenant_id,
+                                conversation_id=job.conversation_id,
+                                agent_run_id=job.agent_run_id,
+                                status=run.status,
+                                output_message_id=None,
+                                conversation_version=event_record.aggregate_version,
+                                message_sequence=None,
+                                occurred_at=effective_time,
+                            ),
+                            aggregate_version=event_record.aggregate_version,
+                        )
+                    )
 
-                _publish_event(event_record, at=failure_time)
+                _publish_event(
+                    event_record,
+                    at=max(failure_time, run.finished_at or failure_time),
+                )
                 return True
 
 
@@ -456,6 +500,34 @@ def _apply_run_snapshot(
     )
     record.failure_code = run.failure.code if run.failure is not None else None
     record.failure_safe_message = run.failure.safe_message if run.failure is not None else None
+
+
+def _terminal_notification_record(
+    *,
+    event: AgentRunTerminalEvent,
+    aggregate_version: int,
+) -> OutboxEventRecord:
+    """Create an initially pending realtime notification outbox row."""
+    if aggregate_version <= 0:
+        raise ValueError("Terminal notification aggregate version must be positive")
+
+    return OutboxEventRecord(
+        tenant_id=event.tenant_id.value,
+        id=event.id.value,
+        aggregate_type=OUTBOX_AGGREGATE_TYPE,
+        aggregate_id=event.conversation_id.value,
+        aggregate_version=aggregate_version,
+        event_type=AGENT_RUN_TERMINAL_EVENT_TYPE,
+        schema_version=AGENT_RUN_TERMINAL_SCHEMA_VERSION,
+        payload=dict(agent_run_terminal_payload(event)),
+        occurred_at=event.occurred_at,
+        available_at=event.occurred_at,
+        attempt_count=0,
+        last_attempt_at=None,
+        lease_token=None,
+        lease_expires_at=None,
+        published_at=None,
+    )
 
 
 def _publish_event(

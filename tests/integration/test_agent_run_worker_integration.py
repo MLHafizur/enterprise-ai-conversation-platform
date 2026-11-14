@@ -18,7 +18,11 @@ from enterprise_chat_platform.application.process_agent_run import (
     ProcessAgentRunWorker,
     TransientChatProviderError,
 )
-from enterprise_chat_platform.domain.agent_run import AgentRunStatus
+from enterprise_chat_platform.application.realtime_events import (
+    AGENT_RUN_TERMINAL_EVENT_TYPE,
+    AGENT_RUN_TERMINAL_PAYLOAD_FIELDS,
+)
+from enterprise_chat_platform.domain.agent_run import AgentRunFailure, AgentRunStatus
 from enterprise_chat_platform.domain.chat import Conversation, MessageRole
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
@@ -54,6 +58,9 @@ from enterprise_chat_platform.infrastructure.persistence.models import (
     ConversationRecord,
     MessageRecord,
     OutboxEventRecord,
+)
+from enterprise_chat_platform.infrastructure.persistence.notification_relay_store import (
+    SqlAlchemyNotificationRelayStore,
 )
 from enterprise_chat_platform.settings import Settings
 
@@ -230,6 +237,14 @@ async def test_worker_success_commits_one_assistant_message_and_terminal_state()
                     OutboxEventRecord,
                     (event.tenant_id.value, event.id.value),
                 )
+                terminal_notification = (
+                    await session.execute(
+                        select(OutboxEventRecord).where(
+                            OutboxEventRecord.tenant_id == event.tenant_id.value,
+                            OutboxEventRecord.event_type == AGENT_RUN_TERMINAL_EVENT_TYPE,
+                        )
+                    )
+                ).scalar_one()
                 messages = (
                     (
                         await session.execute(
@@ -254,6 +269,18 @@ async def test_worker_success_commits_one_assistant_message_and_terminal_state()
             assert outbox is not None
             assert outbox.published_at is not None
             assert outbox.lease_token is None
+            assert terminal_notification.aggregate_version == event.conversation_version
+            assert terminal_notification.published_at is None
+            assert terminal_notification.attempt_count == 0
+            assert set(terminal_notification.payload) == AGENT_RUN_TERMINAL_PAYLOAD_FIELDS
+            assert terminal_notification.payload == {
+                "agent_run_id": str(event.agent_run_id),
+                "status": AgentRunStatus.SUCCEEDED.value,
+                "output_message_id": str(output_message_id),
+                "conversation_version": 2,
+                "message_sequence": 2,
+            }
+            assert "content" not in terminal_notification.payload
             assert len(messages) == 2
             assert messages[1].role == MessageRole.ASSISTANT.value
             assert messages[1].author_id == service_author_id.value
@@ -433,6 +460,148 @@ async def test_terminal_run_makes_duplicate_outbox_delivery_idempotent() -> None
             assert outbox.attempt_count == 2
             assert outbox.published_at is not None
             assert message_count == 2
+    finally:
+        await _cleanup_job(session_factory=session_factory, event=event)
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_worker_failure_commits_one_pending_terminal_notification() -> None:
+    engine, session_factory = _database_resources()
+    event, _ = await _seed_job(session_factory=session_factory)
+    store = SqlAlchemyAgentRunJobStore(session_factory)
+
+    try:
+        async with asyncio.timeout(10):
+            job = await store.claim_next(
+                now=ACCEPTED_AT + timedelta(seconds=1),
+                lease_duration=timedelta(seconds=30),
+            )
+            assert job is not None
+
+            applied = await store.fail(
+                job=job,
+                failure=AgentRunFailure(
+                    code="provider_unavailable",
+                    safe_message="The assistant is temporarily unavailable.",
+                ),
+                failed_at=ACCEPTED_AT + timedelta(seconds=2),
+            )
+            assert applied is True
+
+            async with session_factory() as session:
+                queued = await session.get(
+                    OutboxEventRecord,
+                    (event.tenant_id.value, event.id.value),
+                )
+                run = await session.get(
+                    AgentRunRecord,
+                    (event.tenant_id.value, event.agent_run_id.value),
+                )
+                terminal = (
+                    await session.execute(
+                        select(OutboxEventRecord).where(
+                            OutboxEventRecord.tenant_id == event.tenant_id.value,
+                            OutboxEventRecord.event_type == AGENT_RUN_TERMINAL_EVENT_TYPE,
+                        )
+                    )
+                ).scalar_one()
+
+            assert queued is not None
+            assert queued.published_at is not None
+            assert run is not None
+            assert run.status == AgentRunStatus.FAILED.value
+            assert terminal.aggregate_version == event.conversation_version
+            assert terminal.payload == {
+                "agent_run_id": str(event.agent_run_id),
+                "status": AgentRunStatus.FAILED.value,
+                "output_message_id": None,
+                "conversation_version": event.conversation_version,
+                "message_sequence": None,
+            }
+            assert terminal.published_at is None
+    finally:
+        await _cleanup_job(session_factory=session_factory, event=event)
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_notification_relay_retries_with_lease_fencing_then_publishes() -> None:
+    engine, session_factory = _database_resources()
+    event, service_author_id = await _seed_job(session_factory=session_factory)
+    worker = ProcessAgentRunWorker(
+        store=SqlAlchemyAgentRunJobStore(session_factory),
+        provider=StaticProvider("Relay this terminal state."),
+        clock=FixedClock(
+            ACCEPTED_AT + timedelta(seconds=1),
+            ACCEPTED_AT + timedelta(seconds=2),
+        ),
+        ids=FixedIds(MessageId.new()),
+        service_author_id=service_author_id,
+        config=AgentRunWorkerConfig(),
+    )
+    relay = SqlAlchemyNotificationRelayStore(session_factory)
+
+    try:
+        async with asyncio.timeout(10):
+            assert await worker.process_next() is AgentRunWorkResult.SUCCEEDED
+
+            first = await relay.claim_next(
+                now=ACCEPTED_AT + timedelta(seconds=3),
+                lease_duration=timedelta(seconds=5),
+            )
+            assert first is not None
+            assert first.event.agent_run_id == event.agent_run_id
+            assert first.attempt_count == 1
+
+            assert await relay.reschedule(
+                notification=first,
+                attempted_at=ACCEPTED_AT + timedelta(seconds=4),
+                available_at=ACCEPTED_AT + timedelta(seconds=6),
+            )
+            assert (
+                await relay.claim_next(
+                    now=ACCEPTED_AT + timedelta(seconds=5),
+                    lease_duration=timedelta(seconds=5),
+                )
+                is None
+            )
+
+            second = await relay.claim_next(
+                now=ACCEPTED_AT + timedelta(seconds=6),
+                lease_duration=timedelta(seconds=5),
+            )
+            assert second is not None
+            assert second.event.id == first.event.id
+            assert second.lease_token != first.lease_token
+            assert second.attempt_count == 2
+
+            assert not await relay.mark_published(
+                notification=first,
+                published_at=ACCEPTED_AT + timedelta(seconds=7),
+            )
+            assert await relay.mark_published(
+                notification=second,
+                published_at=ACCEPTED_AT + timedelta(seconds=7),
+            )
+            assert not await relay.mark_published(
+                notification=second,
+                published_at=ACCEPTED_AT + timedelta(seconds=7),
+            )
+
+            async with session_factory() as session:
+                terminal = await session.get(
+                    OutboxEventRecord,
+                    (event.tenant_id.value, second.event.id.value),
+                )
+
+            assert terminal is not None
+            assert terminal.attempt_count == 2
+            assert terminal.published_at == ACCEPTED_AT + timedelta(seconds=7)
+            assert terminal.lease_token is None
+            assert terminal.lease_expires_at is None
     finally:
         await _cleanup_job(session_factory=session_factory, event=event)
         await engine.dispose()

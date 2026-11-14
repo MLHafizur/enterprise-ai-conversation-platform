@@ -1,6 +1,6 @@
 # Chat Domain Contract
 
-Status: Accepted  
+Status: Accepted and implemented
 Date: 2026-11-06
 
 ## Purpose
@@ -56,8 +56,10 @@ Provider-specific request and response objects are not part of the domain.
 - Linked entities must belong to the same tenant.
 - Cross-tenant references are always invalid.
 - Tenant identity comes from trusted authentication context.
-- Tenant isolation will later be enforced by application checks, composite
-  database constraints, and PostgreSQL row-level security.
+- Tenant isolation is enforced by authenticated actor context, application
+  checks, tenant-scoped queries, and composite database constraints.
+- PostgreSQL row-level security remains optional defense-in-depth work for a
+  hostile shared-database deployment.
 
 ## Identifier invariants
 
@@ -135,9 +137,9 @@ It produces:
 The operation performs no network, filesystem, database, Redis, or
 AI-provider I/O.
 
-When persistence is introduced, the updated conversation, user message,
-queued agent run, and outbox event must be committed in one database
-transaction.
+The persistence implementation commits the updated conversation, user
+message, queued agent run, idempotency receipt, and outbox event in one
+database transaction.
 
 ## Agent-run lifecycle
 
@@ -175,8 +177,8 @@ running run becomes `cancelled` only after the worker confirms cancellation.
 
 An in-memory conversation version does not prevent database races.
 
-Persistence will later enforce optimistic concurrency with a compare-and-swap
-operation such as:
+Persistence enforces optimistic concurrency with a compare-and-swap operation
+equivalent to:
 
 ```sql
 UPDATE conversations
@@ -188,16 +190,18 @@ WHERE tenant_id = :tenant_id
 
 Updating zero rows represents a concurrency conflict.
 
-## Deferred concerns
+## Concerns outside this domain contract
 
-The following are intentionally deferred:
+The application and infrastructure layers now implement HTTP, SQLAlchemy,
+transactional outbox processing, provider adapters, retry, Redis, and
+WebSockets. They remain outside the domain model because business entities
+must not depend on those technologies.
 
-- HTTP request and response schemas;
-- SQLAlchemy models and repositories;
+The following product concerns remain intentionally deferred:
+
 - PostgreSQL row-level security;
-- transactional outbox delivery;
-- provider adapters;
-- retries and circuit breakers;
 - token streaming;
+- RAG, embeddings, and document ingestion;
 - tool execution;
+- organization-specific moderation and retention;
 - billing and usage accounting.

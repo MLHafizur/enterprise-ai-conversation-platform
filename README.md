@@ -1,72 +1,108 @@
 # Enterprise Chat Platform
 
-A reliable, multi-tenant chat backend built with Python 3.12, FastAPI,
-PostgreSQL, SQLAlchemy, and Alembic. It accepts a user message once, records
-all durable work atomically, processes the queued agent run in a recoverable
-worker, and exposes polling APIs for the result.
+A production-oriented, multi-tenant chat system built with Python 3.12,
+FastAPI, PostgreSQL, Redis, React, and an asynchronous AI worker. The project
+shows how to accept a message quickly, process it safely in the background,
+notify the browser in real time, and still recover when a process or network
+connection fails.
 
-This is the completed Day 8 backend MVP. The emphasis is not a flashy chat
-screen; it is the engineering underneath one: tenant boundaries, replay-safe
-commands, concurrency control, crash recovery, bounded provider calls, and
-tests against a real PostgreSQL database.
+This is the completed Day 8 learning project. It includes a browser dashboard,
+a local JWT demo login, durable asynchronous processing, WebSocket
+notifications, REST recovery, and an optional Gemini provider.
 
-## Project status
+## What is included
 
-- ✅ Python 3.12 project managed and locked with uv
-- ✅ FastAPI application factory, validated settings, and managed DB lifespan
-- ✅ Liveness plus real PostgreSQL readiness probes
-- ✅ Development-header auth and validated JWT auth for deployed environments
-- ✅ Tenant-scoped conversations, immutable messages, and agent-run lifecycle
-- ✅ Idempotent conversation creation and user-turn acceptance
-- ✅ One atomic transaction for message, run, receipt, outbox, and conversation CAS
-- ✅ Transactional outbox worker with leases, fencing, timeout, retry, and recovery
-- ✅ Conversation, message-page, and agent-run polling APIs
-- ✅ Alembic migrations and separate bootstrap, migrator, and runtime DB roles
-- ✅ Containerized PostgreSQL, migration, API, and worker services
-- ✅ Unit, contract, concurrency, migration-drift, and PostgreSQL integration tests
-
-The local worker intentionally uses `EchoChatProvider`; it returns
-`Echo: <your message>` without external I/O. Replace and inject this adapter
-before calling the system a real AI deployment. Redis, WebSockets, RAG, tool
-execution, and a frontend are deliberate post-MVP work.
+- Python 3.12 project managed and locked with uv
+- React dashboard served through an Nginx frontend gateway on
+  <http://localhost:3000>
+- FastAPI commands, queries, health checks, JWT authentication, and WebSockets
+- Tenant-scoped conversations, immutable messages, and agent-run lifecycle
+- Idempotent conversation creation and user-turn acceptance
+- PostgreSQL transactions, optimistic concurrency, and a transactional outbox
+- Recoverable worker with leases, fencing, timeouts, retry, and backoff
+- Durable terminal notifications relayed to Redis by `enterprise-chat-relay`
+- Redis Pub/Sub, connection presence, and disposable quota counters
+- WebSocket completion signals followed by authoritative REST refetches
+- Deterministic local Echo provider and optional Gemini REST adapter
+- Alembic migrations and separate bootstrap, migrator, and runtime DB roles
+- Unit, frontend, contract, concurrency, migration, and PostgreSQL tests
 
 ## Architecture in plain language
 
-Think of the platform as a restaurant:
+Think of the system as a restaurant with a reliable paper trail:
 
-- The API is the waiter. It authenticates the customer and writes the order.
-- PostgreSQL is the order ledger. It is the durable source of truth.
-- The outbox row is the kitchen ticket written in the same transaction as the
-  order, so the food request cannot be lost after the customer gets a receipt.
-- The worker is a cook. It leases one ticket, calls the provider, then records
-  the assistant message and marks the ticket complete.
-- If a cook crashes, the lease expires and another cook can safely take over.
-- The client polls the run and message endpoints like checking the order board.
+- The **frontend gateway** is the reception desk. The browser uses one origin,
+  and Nginx sends `/api` and `/ws` traffic to FastAPI.
+- The **API** is the waiter. It checks identity, validates the order, and
+  returns quickly.
+- **PostgreSQL** is the official order ledger. Conversation history, queued
+  work, idempotency receipts, and notification records live there.
+- The **outbox** is a mailbox inside that same ledger. Writing the chat change
+  and its work ticket in one transaction prevents the classic “saved the
+  message but forgot to queue the job” failure.
+- The **worker** is the cook. It leases a queued ticket, calls Echo or Gemini
+  outside the database transaction, then records the final result.
+- The **relay** is the mail carrier. It leases the durable terminal-notification
+  row and rings Redis after the run finishes.
+- **Redis** is a doorbell, not the ledger. A missed ring never deletes the
+  result because the result remains in PostgreSQL.
+- The **WebSocket** tells the browser that something changed. It deliberately
+  carries no prompt or assistant content.
+- The browser then **refetches through REST** and renders the authoritative
+  PostgreSQL state. It also polls while a run is pending, so a lost WebSocket
+  signal does not strand the UI.
 
-```text
-Client
-  │
-  ├─ PUT conversation / POST turn
-  ▼
-FastAPI API ── one DB transaction ──► PostgreSQL
-                                         ├─ conversation + message
-                                         ├─ queued agent run
-                                         ├─ idempotency receipt
-                                         └─ outbox event
-                                                │ leased with SKIP LOCKED
-                                                ▼
-                                         Agent worker
-                                                │ bounded call
-                                                ▼
-                                         ChatProvider
-                                                │
-                                                └─ assistant message + terminal run
+```mermaid
+flowchart LR
+    Browser["React browser<br/>localhost:3000"]
+    Gateway["Nginx frontend gateway<br/>/api + /ws"]
+    API["FastAPI API + WebSocket"]
+    DB[("PostgreSQL<br/>durable ledger + outbox")]
+    Worker["Agent worker"]
+    Provider["Echo or Gemini"]
+    Relay["Notification relay"]
+    Redis[("Redis<br/>doorbell + ephemeral quotas")]
+
+    Browser -->|HTTP and WebSocket| Gateway
+    Gateway --> API
+    API -->|atomic commands + REST queries| DB
+    Worker -->|lease queued work| DB
+    Worker -->|bounded provider call| Provider
+    Worker -->|assistant result + terminal outbox row| DB
+    Relay -->|lease terminal notification| DB
+    Relay -->|content-free publish| Redis
+    Redis -->|tenant channel| API
+    API -->|completion signal only| Browser
+    Browser -.->|REST refetch after signal or poll| Gateway
 ```
 
-The provider call is never made while a database transaction is open. See
-[the operations runbook](docs/operations.md) for failure and recovery details,
-and [the domain contract](docs/architecture/chat-domain.md) for business
-invariants.
+The full component and event-flow explanation is in
+[docs/architecture/full-stack.md](docs/architecture/full-stack.md). The core
+business invariants are in
+[docs/architecture/chat-domain.md](docs/architecture/chat-domain.md).
+
+## One message from start to finish
+
+1. The browser creates a conversation and sends a message with a new
+   `Idempotency-Key`.
+2. The API commits the user message, queued run, idempotency receipt,
+   conversation version, and worker outbox row in one PostgreSQL transaction.
+3. The API returns `202`; it does not wait for the model.
+4. The worker leases the outbox row with `FOR UPDATE SKIP LOCKED`, commits the
+   short claim, and calls the configured provider without holding a DB
+   transaction open.
+5. On success, one transaction appends the assistant message, completes the
+   run, and creates a durable `agent_run.terminal.v1` notification row.
+6. The relay leases that notification and publishes a content-free event to a
+   tenant-specific Redis channel.
+7. The API's Redis subscriber forwards the signal only to authenticated local
+   WebSocket clients subscribed to that conversation.
+8. The browser receives the signal and fetches the run and messages through
+   REST. PostgreSQL—not the WebSocket payload—supplies the displayed content.
+
+Duplicate provider calls or duplicate Redis signals are possible around
+crashes because both boundaries are at-least-once. Leases, fencing,
+idempotency, event IDs, and idempotent REST reads make those duplicates safe.
 
 ## Requirements
 
@@ -74,8 +110,10 @@ invariants.
 - Python `>=3.12,<3.13`
 - Docker with Docker Compose
 - Git
+- OpenSSL for local secret generation
+- Node.js 20 only when running frontend checks directly on the host
 
-Confirm the project interpreter:
+Confirm the Python interpreter:
 
 ```bash
 uv run python --version
@@ -83,212 +121,144 @@ uv run python --version
 
 It must report Python `3.12.x`.
 
-## Quick start with Docker Compose
+## Local Docker workflow
 
-Enter the project and install the locked development environment:
+Enter the project and run the safe local helper:
 
 ```bash
 cd day8-enterprise_chat_agent
-uv sync --frozen --all-groups
-cp .env.example .env
+./scripts/start-local.sh
 ```
 
-Edit `.env`. At minimum, set three different local-only passwords:
+On the first run, the helper copies `.env.example` to a mode-`600` `.env`,
+generates separate URL-safe PostgreSQL passwords and a local JWT demo secret
+without printing them, validates the Compose configuration, builds the images,
+and waits for the stack to become healthy. It preserves existing nonblank
+values. These are development credentials; never commit `.env`.
+
+The local full-stack profile uses:
 
 ```dotenv
-POSTGRES_BOOTSTRAP_PASSWORD=replace-with-a-long-local-password
-POSTGRES_MIGRATOR_PASSWORD=replace-with-a-different-long-password
-POSTGRES_RUNTIME_PASSWORD=replace-with-another-long-password
-```
-
-For host-run development and tests, also set these URLs with the same
-migrator and runtime passwords. URL-encode a password if it contains reserved
-URL characters.
-
-```dotenv
-CHAT_DATABASE_URL=postgresql+asyncpg://enterprise_chat_app:RUNTIME_PASSWORD@127.0.0.1:55432/enterprise_chat
-CHAT_MIGRATION_DATABASE_URL=postgresql+asyncpg://enterprise_chat_migrator:MIGRATOR_PASSWORD@127.0.0.1:55432/enterprise_chat
-```
-
-Start the complete stack:
-
-```bash
-docker compose up --build --detach
-docker compose ps --all
-```
-
-Compose waits for PostgreSQL, runs `alembic upgrade head` once, then starts the
-API and worker. Check the endpoints:
-
-```bash
-curl --fail-with-body http://127.0.0.1:8000/health/live
-curl --fail-with-body http://127.0.0.1:8000/health/ready
-```
-
-Interactive OpenAPI documentation is at <http://127.0.0.1:8000/docs>.
-
-## End-to-end local walkthrough
-
-Local Compose uses development authentication. Identity is supplied through
-headers only in `local` and `test`; it is never accepted in request JSON.
-
-Set stable example IDs:
-
-```bash
-BASE_URL=http://127.0.0.1:8000
-TENANT_ID=11111111-1111-4111-8111-111111111111
-USER_ID=22222222-2222-4222-8222-222222222222
-CONVERSATION_ID=33333333-3333-4333-8333-333333333333
-```
-
-Create the conversation. The first request returns `201`; an identical replay
-returns `200` with `"replayed": true`.
-
-```bash
-curl --fail-with-body --request PUT \
-  --header "X-Dev-Tenant-Id: $TENANT_ID" \
-  --header "X-Dev-User-Id: $USER_ID" \
-  "$BASE_URL/v1/conversations/$CONVERSATION_ID"
-```
-
-Submit one turn with a client-generated idempotency key. The API returns `202`
-without waiting for the provider.
-
-```bash
-TURN_RESPONSE="$(curl --fail-with-body --silent --show-error \
-  --request POST \
-  --header 'Content-Type: application/json' \
-  --header "X-Dev-Tenant-Id: $TENANT_ID" \
-  --header "X-Dev-User-Id: $USER_ID" \
-  --header 'Idempotency-Key: walkthrough-turn-001' \
-  --data '{"content":"Explain transactional outbox in one sentence."}' \
-  "$BASE_URL/v1/conversations/$CONVERSATION_ID/turns")"
-printf '%s\n' "$TURN_RESPONSE"
-```
-
-Extract the generated run ID with the project Python:
-
-```bash
-RUN_ID="$(printf '%s' "$TURN_RESPONSE" | \
-  uv run python -c 'import json, sys; print(json.load(sys.stdin)["agent_run_id"])')"
-printf 'run=%s\n' "$RUN_ID"
-```
-
-Poll the run. Its status moves through `queued`/`running` to `succeeded` (or
-`failed` with a safe public message).
-
-```bash
-curl --fail-with-body \
-  --header "X-Dev-Tenant-Id: $TENANT_ID" \
-  --header "X-Dev-User-Id: $USER_ID" \
-  "$BASE_URL/v1/agent-runs/$RUN_ID"
-```
-
-List messages in ascending sequence order. With the local echo provider, the
-second item is the assistant response.
-
-```bash
-curl --fail-with-body \
-  --header "X-Dev-Tenant-Id: $TENANT_ID" \
-  --header "X-Dev-User-Id: $USER_ID" \
-  "$BASE_URL/v1/conversations/$CONVERSATION_ID/messages?limit=50"
-```
-
-To prove idempotency, repeat the turn request with the same key and exact
-payload. It returns the original message/run IDs with `"replayed": true` and
-creates no duplicate rows. Reusing that key for different content returns
-`409 idempotency_conflict`.
-
-## Run services directly during development
-
-Start only PostgreSQL, apply migrations from the host, then run the API and
-worker in two terminals:
-
-```bash
-docker compose up --detach postgres
-uv run alembic upgrade head
-```
-
-```bash
-uv run uvicorn enterprise_chat_platform.main:create_app \
-  --factory \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --no-access-log \
-  --reload
-```
-
-```bash
-uv run enterprise-chat-worker
-```
-
-Stop the Compose services without deleting data:
-
-```bash
-docker compose down
-```
-
-## Idempotency and recovery guarantees
-
-Accepting a turn atomically commits the conversation compare-and-swap update,
-user message, queued run, idempotency receipt, and outbox event. Either all
-five become durable, or none do.
-
-The idempotency scope is tenant + conversation + operation + key:
-
-- Same scope and same request returns the original result.
-- Same scope but different request returns `409`.
-- Concurrent same-key requests serialize safely in PostgreSQL.
-- Concurrent different-key writes use optimistic version checks; a loser gets
-  `409 conversation_conflict` and can retry.
-- After a network/commit uncertainty, retry the exact request with the same
-  key instead of inventing a new key.
-
-The worker leases due outbox rows with `FOR UPDATE SKIP LOCKED`. A lease token
-fences stale workers. Provider timeouts and transient failures are retried with
-bounded exponential backoff and jitter; the default is at most five attempts.
-A crashed worker leaves durable work behind, and another worker can reclaim it
-after the lease expires. Provider calls are therefore at-least-once; a real
-provider adapter should also use its own idempotency facility when available.
-
-## Authentication
-
-Development mode accepts `X-Dev-Tenant-Id` and `X-Dev-User-Id` only when
-`CHAT_ENVIRONMENT` is `local` or `test`, `CHAT_AUTH_MODE=development`, and
-`CHAT_ALLOW_INSECURE_DEVELOPMENT_AUTH=true`. The opt-in defaults to `false`,
-so missing deployment configuration fails closed instead of trusting headers.
-
-Staging and production fail startup unless JWT mode is enabled. A production
-baseline is:
-
-```dotenv
-CHAT_ENVIRONMENT=production
-CHAT_DEBUG=false
 CHAT_AUTH_MODE=jwt
-CHAT_ALLOW_INSECURE_DEVELOPMENT_AUTH=false
-CHAT_PROVIDER_MODE=disabled
-CHAT_JWT_ALGORITHM=RS256
-CHAT_JWT_KEY=<verification-public-key-injected-by-your-secret-manager>
-CHAT_JWT_ISSUER=enterprise-chat-platform
-CHAT_JWT_AUDIENCE=enterprise-chat-api
+CHAT_DEMO_AUTH_ENABLED=true
+CHAT_JWT_ALGORITHM=HS256
+CHAT_JWT_KEY=replace-with-a-long-random-local-secret
+CHAT_REALTIME_ENABLED=true
+CHAT_PROVIDER_MODE=echo
 ```
 
-The bearer token must contain `exp`, `iat`, `iss`, `aud`, `sub`, and
-`tenant_id`. Both `sub` and `tenant_id` must be UUIDs. The algorithm is pinned
-from configuration; staging/production reject symmetric `HS256`. Never commit
-the verification key or place a private signing key in this service.
+The expected services are:
 
-## Health behavior
+| Service | Expected state | Job |
+|---|---|---|
+| `postgres` | healthy | Durable data, idempotency, and outbox ledger |
+| `redis` | healthy | Ephemeral Pub/Sub, presence, and quotas |
+| `migrate` | exited `0` | One-shot `alembic upgrade head` |
+| `api` | healthy | REST, JWT validation, and WebSockets |
+| `worker` | running | Provider work and durable result commits |
+| `relay` | running | PostgreSQL terminal outbox to Redis Pub/Sub |
+| `frontend` | healthy/running | React assets and same-origin gateway |
 
-- `GET /health/live` proves the HTTP process is alive; dependency failures do
-  not make it fail.
-- `GET /health/ready` runs a bounded `SELECT 1` against PostgreSQL. It returns
-  `503` when the database is unavailable, so an orchestrator can stop routing
-  new traffic.
+Open <http://localhost:3000>. Choose Acme Corp or TechStart Inc and a demo
+role, sign in, and send a message. The default Echo provider returns a
+deterministic response without external network access.
 
-## Quality gates
+Check health through the browser gateway. The Compose API has no host port; it
+is reachable only through this same-origin gateway:
 
-The default test command excludes integration tests:
+```bash
+curl --fail-with-body http://localhost:3000/api/health/live
+curl --fail-with-body http://localhost:3000/api/health/ready
+```
+
+Follow the asynchronous path in the logs:
+
+```bash
+docker compose logs --follow --tail=100 api worker relay
+```
+
+Stop stateless services while preserving PostgreSQL data:
+
+```bash
+./scripts/stop-local.sh
+```
+
+See [docs/operations.md](docs/operations.md) for restart, inspection, recovery,
+and local reset procedures.
+
+## Demo login is not production SSO
+
+The bundled `/auth/login` route exists only to make the local dashboard easy
+to explore. When explicitly enabled in `local` or `test`, it converts an
+allowlisted demo tenant and role into a short-lived HS256 JWT. It is not a
+password system, SSO implementation, or production identity provider.
+
+Staging and production fail configuration validation if demo login is enabled.
+A real deployment must:
+
+- use an external OIDC/SAML-backed identity provider;
+- let that provider authenticate users and issue JWT access tokens;
+- configure this API with pinned `RS256` or `ES256` verification settings;
+- include `exp`, `iat`, `iss`, `aud`, `sub`, and `tenant_id` claims;
+- treat `sub` and `tenant_id` as UUIDs and derive identity only from the
+  verified token; and
+- use TLS/WSS and an intentional browser token-handling strategy.
+
+Development header authentication remains useful for focused API tests, but it
+is a separate mode and is forbidden in staging and production.
+
+## Optional Gemini provider
+
+Echo is the safe local default. To exercise the external provider boundary,
+set the worker to Gemini and inject the API key through local secrets:
+
+```dotenv
+CHAT_PROVIDER_MODE=gemini
+CHAT_GEMINI_API_KEY=replace-locally
+CHAT_GEMINI_MODEL=gemini-2.5-flash
+```
+
+Then recreate the worker:
+
+```bash
+docker compose up --build --detach worker
+```
+
+The Gemini adapter uses a bounded HTTP call, classifies timeouts, `408`, `429`,
+and `5xx` responses as transient, and returns only safe failure messages to the
+client. It never makes Redis or Gemini authoritative for chat history. External
+model usage can incur cost; keep Echo enabled when learning the architecture.
+
+## Reliability and failure behavior
+
+| Failure | What the system does | User-visible result |
+|---|---|---|
+| API response is lost after commit | Exact retry with the same idempotency key returns the original IDs | No duplicate user turn |
+| Worker stops | Queued work stays in PostgreSQL; an expired lease can be reclaimed | Run remains pending until a worker returns |
+| Provider is temporarily unavailable | Worker releases the lease and retries with bounded backoff | UI waits and polls |
+| Provider exhausts attempts | Run becomes failed with a safe public message | Browser refetch shows terminal failure |
+| Relay or Redis stops | Terminal notification remains pending in PostgreSQL | WebSocket signal is delayed; REST polling still finds the result |
+| Relay publishes, then crashes before marking | The event may be published again after lease expiry | Duplicate signal causes another safe REST refetch |
+| WebSocket disconnects | Browser reconnects with bounded backoff and continues polling | Chat remains usable through REST |
+| Frontend gateway stops | Browser entry point is unavailable | Durable work and data remain intact |
+| PostgreSQL stops | Readiness returns `503`; durable commands cannot safely proceed | No false successful write |
+
+The WebSocket event contains IDs, terminal status, conversation version, and
+message sequence only. It does not contain prompts or assistant content.
+
+## Authentication and health
+
+- `GET /health/live` proves that the HTTP process is alive.
+- `GET /health/ready` checks PostgreSQL and, when realtime is enabled, Redis.
+  A required dependency failure returns `503` so traffic can be removed.
+- JWT algorithms, issuer, and audience are pinned by configuration.
+- WebSockets authenticate in the first frame, enforce an origin allowlist,
+  authorize each conversation subscription, limit frame size, and maintain
+  expiring connection leases.
+
+## Test commands
+
+Run the locked Python quality gates:
 
 ```bash
 uv lock --check
@@ -299,7 +269,17 @@ uv run mypy src tests migrations/env.py migrations/versions
 uv run pytest -q
 ```
 
-Run real PostgreSQL tests after the local database is healthy and migrated:
+Run frontend checks:
+
+```bash
+npm --prefix frontend ci
+CI=true npm --prefix frontend test -- --watchAll=false --runInBand
+npm --prefix frontend run build
+```
+
+Run real PostgreSQL integration tests after the local database is healthy and
+migrated. First export the two host database URLs as described in the
+[migration workflow](docs/operations.md#migration-workflow), then run:
 
 ```bash
 docker compose up --detach postgres
@@ -308,32 +288,40 @@ uv run pytest -m integration -q
 uv run alembic check
 ```
 
-Integration tests perform real I/O and should target only the local Compose
-database. More migration and recovery commands are in
-[docs/operations.md](docs/operations.md).
+`alembic check` must report `No new upgrade operations detected.` Integration
+tests must point only at the disposable local Compose database.
 
 ## Project structure
 
 ```text
 .
-├── compose.yaml                  # postgres + migrate + api + worker
+├── compose.yaml                  # full local service graph
 ├── Dockerfile                    # non-root Python 3.12 runtime image
-├── docker/postgres/init/         # one-time roles, DB, and schema bootstrap
+├── docker/
+│   ├── Dockerfile.frontend       # React build + Nginx runtime
+│   ├── nginx.conf                # same-origin /api and /ws gateway
+│   └── postgres/init/            # one-time roles, DB, and schema bootstrap
+├── frontend/                     # React dashboard and browser tests
 ├── migrations/                   # ordered Alembic schema changes
+├── scripts/
+│   ├── start-local.sh            # generate local secrets, build, and wait
+│   └── stop-local.sh             # safe stop; optional destructive reset
 ├── docs/
+│   ├── architecture/full-stack.md
 │   ├── architecture/chat-domain.md
 │   └── operations.md
 ├── src/enterprise_chat_platform/
-│   ├── api/                      # auth, health, commands, and query routes
-│   ├── application/              # create, accept-turn, and worker use cases
+│   ├── api/                      # auth, commands, queries, health, WebSocket
+│   ├── application/              # use cases and transport-independent ports
 │   ├── domain/                   # framework-independent business rules
 │   ├── infrastructure/
-│   │   ├── chat_provider.py      # local EchoChatProvider boundary
-│   │   └── persistence/          # models, mappers, repos, UoWs, job store
+│   │   ├── persistence/          # models, UoWs, repositories, leased stores
+│   │   ├── realtime/             # Redis publisher/subscriber and connections
+│   │   ├── chat_provider.py      # local Echo adapter
+│   │   └── gemini_provider.py    # optional Gemini REST adapter
 │   ├── main.py                   # API composition
-│   ├── runtime.py                # lifespan-owned DB engine/session factory
-│   ├── settings.py               # validated environment configuration
-│   └── worker.py                 # recoverable worker entry point
+│   ├── worker.py                 # `enterprise-chat-worker`
+│   └── relay.py                  # `enterprise-chat-relay`
 └── tests/
     ├── api/
     ├── unit/
@@ -341,19 +329,37 @@ database. More migration and recovery commands are in
 ```
 
 Dependencies point inward: transport and infrastructure depend on application
-and domain contracts; the domain does not import FastAPI or SQLAlchemy.
+and domain contracts; the domain does not import FastAPI, Redis, or SQLAlchemy.
 
-## Deliberate MVP boundaries
+## Production checklist
 
-- `EchoChatProvider` is only for local learning and deterministic tests. A real
-  production provider adapter, credentials, provider-specific idempotency,
-  quotas, and safety policy must be injected at worker composition.
-- Clients poll durable HTTP query endpoints. Redis and WebSockets are deferred
-  until realtime fan-out is actually required.
-- RAG, embeddings, model routing, and tool execution are separate bounded
-  contexts and are not hidden inside this reliable chat core.
-- PostgreSQL is the durable source of truth; Redis must not later become the
-  only home of conversation history or pending work.
+- Disable demo login and development-header authentication.
+- Integrate an external IdP; use asymmetric JWT verification and TLS/WSS.
+- Put signing/verification material, DB passwords, Redis credentials, and the
+  Gemini key in a secret manager; never bake them into images.
+- Use managed PostgreSQL backups, point-in-time recovery, restore drills, and
+  a migration approval pipeline.
+- Use authenticated/TLS Redis, memory limits, and a topology appropriate for
+  disposable Pub/Sub and counters—not durable chat storage.
+- Keep API/worker/relay DB credentials DML-only and migrator credentials only
+  in the migration job.
+- Set an explicit WebSocket origin allowlist; never use `*` in deployment.
+- Scale API, workers, and relays independently; test lease, quota, and provider
+  limits at expected peak concurrency.
+- Alert on readiness, outbox age/depth, retries, terminal failures, Redis
+  disconnects, WebSocket counts, provider latency, and error rate.
+- Keep prompts, message content, bearer tokens, API keys, and raw provider
+  errors out of logs and Redis notifications.
+- Add PostgreSQL row-level security if hostile tenants share a database; the
+  current application and composite constraints enforce tenant scope, but RLS
+  is an additional defense.
+- Verify the provider's data retention, regional, safety, rate-limit, and
+  idempotency behavior before sending production data.
+- Load-test the gateway and WebSocket upgrade path, rehearse worker/relay
+  crashes, and document rollback and incident ownership.
+
+RAG, embeddings, tool execution, billing, and token streaming are separate
+bounded contexts and are intentionally not hidden inside this reliable core.
 
 ## License
 
