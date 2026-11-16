@@ -21,6 +21,7 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     IdempotencyReceiptRecord,
     MessageRecord,
@@ -34,6 +35,8 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 BASE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 IDEMPOTENCY_KEY = "Request-AbC-001"
 REQUEST_FINGERPRINT = "a" * 64
+ASSISTANT_PROFILE_ID = UUID("00000000-0000-4000-8000-000000000201")
+ASSISTANT_PROFILE_VERSION = 1
 
 
 def _create_local_runtime_engine() -> AsyncEngine:
@@ -95,6 +98,8 @@ def _agent_run_values(
         "id": agent_run_id,
         "conversation_id": conversation_id,
         "input_message_id": message_id,
+        "assistant_profile_id": ASSISTANT_PROFILE_ID,
+        "assistant_profile_version": ASSISTANT_PROFILE_VERSION,
         "status": "queued",
         "created_at": BASE_TIME,
         "started_at": None,
@@ -137,6 +142,22 @@ async def _insert_valid_parents(
     agent_run_id: UUID,
 ) -> None:
     """Insert the valid rows referenced by one receipt."""
+    await connection.execute(
+        insert(AssistantProfileVersionRecord).values(
+            tenant_id=tenant_id,
+            profile_id=ASSISTANT_PROFILE_ID,
+            version=ASSISTANT_PROFILE_VERSION,
+            prompt_template_version="enterprise-chat.v1",
+            assistant_name="Schema Test Assistant",
+            organization_name="Schema Test Organization",
+            response_tone="professional",
+            expertise="senior_engineer",
+            communication_style="direct_helpful",
+            context_character_limit=4_096,
+            created_at=BASE_TIME,
+            created_by=uuid4(),
+        )
+    )
     await connection.execute(
         insert(ConversationRecord).values(
             _conversation_values(

@@ -13,6 +13,7 @@ from uuid import UUID
 
 from enterprise_chat_platform.application.tenant_prompting import AgentPromptBuilder
 from enterprise_chat_platform.domain.agent_run import AgentRunFailure
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfile
 from enterprise_chat_platform.domain.chat import MAX_USER_MESSAGE_LENGTH
 from enterprise_chat_platform.domain.governance import (
     PolicyAction,
@@ -95,6 +96,7 @@ class ClaimedAgentRun:
     agent_run_id: AgentRunId
     input_message_id: MessageId
     input_content: str = field(repr=False)
+    assistant_profile: AssistantProfile = field(repr=False)
     lease_token: UUID
     attempt_count: int
     context_messages: tuple[PromptTurn, ...] = field(default=(), repr=False)
@@ -102,6 +104,8 @@ class ClaimedAgentRun:
     def __post_init__(self) -> None:
         if self.attempt_count <= 0:
             raise ValueError("Claimed attempt count must be positive")
+        if self.assistant_profile.tenant_id != self.tenant_id:
+            raise ValueError("Claimed assistant profile must belong to the job tenant")
 
 
 class AgentRunJobStore(Protocol):
@@ -278,7 +282,7 @@ class ProcessAgentRunWorker:
 
         prompt = (
             self._prompt_builder.build(
-                tenant_id=job.tenant_id,
+                profile=job.assistant_profile,
                 context_messages=job.context_messages,
             )
             if self._prompt_builder is not None

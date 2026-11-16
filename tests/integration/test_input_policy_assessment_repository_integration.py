@@ -7,8 +7,10 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from enterprise_chat_platform.application.tenant_catalog import default_assistant_profile
 from enterprise_chat_platform.domain.chat import Conversation
 from enterprise_chat_platform.domain.governance import PolicyAction, PolicyAssessment
 from enterprise_chat_platform.domain.identifiers import (
@@ -27,6 +29,9 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 from enterprise_chat_platform.infrastructure.persistence.mappers.agent_run import (
     agent_run_to_new_record,
 )
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_to_record,
+)
 from enterprise_chat_platform.infrastructure.persistence.mappers.conversation import (
     conversation_to_new_record,
 )
@@ -35,13 +40,15 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.message import 
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     MessageRecord,
+    TenantAssistantProfileAssignmentRecord,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.input_policy_assessment import (
     SqlAlchemyInputPolicyAssessmentRepository,
 )
-from enterprise_chat_platform.settings import Settings
+from enterprise_chat_platform.settings import MigrationSettings, Settings
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 BASE_TIME = datetime(2026, 11, 16, 16, 0, tzinfo=UTC)
@@ -55,14 +62,37 @@ class _ParentGraph:
     agent_run_id: AgentRunId
 
 
-def _runtime_session_factory() -> tuple[AsyncSessionFactory, AsyncEngine]:
-    settings = Settings()
-    database_url = make_url(settings.database_url.get_secret_value())
-    assert settings.environment in {"local", "test"}
-    assert database_url.host in LOOPBACK_HOSTS
+def _database_resources() -> tuple[
+    AsyncSessionFactory,
+    AsyncEngine,
+    AsyncSessionFactory,
+    AsyncEngine,
+]:
+    runtime_settings = Settings()
+    migration_settings = MigrationSettings()
+    runtime_url = make_url(runtime_settings.database_url.get_secret_value())
+    migration_url = make_url(migration_settings.migration_database_url.get_secret_value())
+    assert runtime_settings.environment in {"local", "test"}
+    assert runtime_url.host in LOOPBACK_HOSTS
+    assert migration_url.host in LOOPBACK_HOSTS
+    assert (runtime_url.host, runtime_url.port, runtime_url.database) == (
+        migration_url.host,
+        migration_url.port,
+        migration_url.database,
+    )
 
-    engine = create_database_engine(settings)
-    return create_session_factory(engine), engine
+    runtime_engine = create_database_engine(runtime_settings)
+    migration_engine = create_async_engine(
+        migration_url,
+        poolclass=NullPool,
+        hide_parameters=True,
+    )
+    return (
+        create_session_factory(runtime_engine),
+        runtime_engine,
+        create_session_factory(migration_engine),
+        migration_engine,
+    )
 
 
 def _assessment(*, version: str, risk_score: float) -> PolicyAssessment:
@@ -84,6 +114,10 @@ async def _stage_parent_graph(
     conversation_id = ConversationId.new()
     message_id = MessageId.new()
     actor_id = UserId.new()
+    profile = default_assistant_profile(
+        tenant_id=resolved_tenant_id,
+        created_at=BASE_TIME,
+    )
 
     conversation = Conversation.create(
         id=conversation_id,
@@ -96,11 +130,24 @@ async def _stage_parent_graph(
         actor_id=actor_id,
         message_id=message_id,
         agent_run_id=resolved_agent_run_id,
+        assistant_profile_ref=profile.ref,
         content="Explain deterministic policy decisions.",
         idempotency_key=IdempotencyKey(f"policy-{conversation_id}"),
         at=BASE_TIME,
     )
 
+    session.add(assistant_profile_to_record(profile))
+    session.add(
+        TenantAssistantProfileAssignmentRecord(
+            tenant_id=resolved_tenant_id.value,
+            profile_id=profile.ref.id.value,
+            profile_version=profile.ref.version,
+            revision=0,
+            activated_at=profile.created_at,
+            activated_by=profile.created_by.value,
+        )
+    )
+    await session.flush()
     session.add(conversation_to_new_record(accepted.updated_conversation))
     await session.flush()
     session.add(message_to_new_record(accepted.message))
@@ -135,12 +182,22 @@ async def _delete_parent_graph(session: AsyncSession, graph: _ParentGraph) -> No
             ConversationRecord.id == graph.conversation_id.value,
         )
     )
+    await session.execute(
+        delete(TenantAssistantProfileAssignmentRecord).where(
+            TenantAssistantProfileAssignmentRecord.tenant_id == graph.tenant_id.value,
+        )
+    )
+    await session.execute(
+        delete(AssistantProfileVersionRecord).where(
+            AssistantProfileVersionRecord.tenant_id == graph.tenant_id.value,
+        )
+    )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_round_trip_and_sequential_first_write_wins() -> None:
-    session_factory, engine = _runtime_session_factory()
+    session_factory, engine, _, migration_engine = _database_resources()
     first = _assessment(version="conversation-input.v1", risk_score=0.1)
     later = _assessment(version="conversation-input.v2", risk_score=0.2)
 
@@ -177,12 +234,13 @@ async def test_round_trip_and_sequential_first_write_wins() -> None:
                     await transaction.rollback()
     finally:
         await engine.dispose()
+        await migration_engine.dispose()
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_same_run_uuid_remains_isolated_by_tenant() -> None:
-    session_factory, engine = _runtime_session_factory()
+    session_factory, engine, _, migration_engine = _database_resources()
     shared_agent_run_id = AgentRunId.new()
     first = _assessment(version="conversation-input.tenant-a", risk_score=0.1)
     second = _assessment(version="conversation-input.tenant-b", risk_score=0.2)
@@ -233,12 +291,13 @@ async def test_same_run_uuid_remains_isolated_by_tenant() -> None:
                     await transaction.rollback()
     finally:
         await engine.dispose()
+        await migration_engine.dispose()
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_caller_rollback_leaves_no_assessment() -> None:
-    session_factory, engine = _runtime_session_factory()
+    session_factory, engine, migration_session_factory, migration_engine = _database_resources()
     graph: _ParentGraph | None = None
 
     try:
@@ -273,14 +332,16 @@ async def test_caller_rollback_leaves_no_assessment() -> None:
                     is None
                 )
 
-            async with session.begin():
-                await _delete_parent_graph(session, graph)
+            async with migration_session_factory() as cleanup_session:
+                async with cleanup_session.begin():
+                    await _delete_parent_graph(cleanup_session, graph)
             graph = None
     finally:
         # A failure before normal cleanup still cannot leave an assessment because
         # its caller-owned transaction is rolled back when the session closes.
         if graph is not None:
-            async with session_factory() as cleanup_session:
+            async with migration_session_factory() as cleanup_session:
                 async with cleanup_session.begin():
                     await _delete_parent_graph(cleanup_session, graph)
         await engine.dispose()
+        await migration_engine.dispose()

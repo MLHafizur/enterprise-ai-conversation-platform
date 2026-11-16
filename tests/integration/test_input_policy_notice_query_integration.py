@@ -14,6 +14,7 @@ from enterprise_chat_platform.api.policy_notices import (
     SqlAlchemyInputPolicyNoticeQueries,
 )
 from enterprise_chat_platform.application.accept_user_turn import ActorContext
+from enterprise_chat_platform.application.tenant_catalog import default_assistant_profile
 from enterprise_chat_platform.domain.chat import Conversation
 from enterprise_chat_platform.domain.governance import (
     PolicyAction,
@@ -37,6 +38,9 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 from enterprise_chat_platform.infrastructure.persistence.mappers.agent_run import (
     agent_run_to_new_record,
 )
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_to_record,
+)
 from enterprise_chat_platform.infrastructure.persistence.mappers.conversation import (
     conversation_to_new_record,
 )
@@ -48,9 +52,11 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.message import 
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     InputPolicyAssessmentRecord,
     MessageRecord,
+    TenantAssistantProfileAssignmentRecord,
 )
 from enterprise_chat_platform.settings import MigrationSettings, Settings
 
@@ -142,6 +148,10 @@ async def _seed(
         created_by=owner_id,
         at=BASE_TIME,
     )
+    profile = default_assistant_profile(
+        tenant_id=tenant_id,
+        created_at=BASE_TIME,
+    )
     turns = []
     actions = (PolicyAction.ALLOW, PolicyAction.BLOCK, PolicyAction.ESCALATE)
     for index, action in enumerate(actions, start=1):
@@ -150,6 +160,7 @@ async def _seed(
             actor_id=owner_id,
             message_id=MessageId.new(),
             agent_run_id=AgentRunId.new(),
+            assistant_profile_ref=profile.ref,
             content=f"Integration policy input {index}",
             idempotency_key=IdempotencyKey(f"notice-integration-{index}-{conversation_id}"),
             at=BASE_TIME + timedelta(seconds=index),
@@ -158,6 +169,18 @@ async def _seed(
         turns.append((accepted, action))
 
     async with session_factory() as session, session.begin():
+        session.add(assistant_profile_to_record(profile))
+        session.add(
+            TenantAssistantProfileAssignmentRecord(
+                tenant_id=tenant_id.value,
+                profile_id=profile.ref.id.value,
+                profile_version=profile.ref.version,
+                revision=0,
+                activated_at=profile.created_at,
+                activated_by=profile.created_by.value,
+            )
+        )
+        await session.flush()
         session.add(conversation_to_new_record(conversation))
         await session.flush()
         for index, (accepted, action) in enumerate(turns, start=1):
@@ -213,6 +236,16 @@ async def _cleanup(
             delete(ConversationRecord).where(
                 ConversationRecord.tenant_id == tenant_id,
                 ConversationRecord.id == conversation_id,
+            )
+        )
+        await session.execute(
+            delete(TenantAssistantProfileAssignmentRecord).where(
+                TenantAssistantProfileAssignmentRecord.tenant_id == tenant_id,
+            )
+        )
+        await session.execute(
+            delete(AssistantProfileVersionRecord).where(
+                AssistantProfileVersionRecord.tenant_id == tenant_id,
             )
         )
 

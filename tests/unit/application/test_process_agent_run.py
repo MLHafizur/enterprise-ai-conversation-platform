@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -25,6 +26,13 @@ from enterprise_chat_platform.application.process_agent_run import (
     _valid_completion_content,
 )
 from enterprise_chat_platform.domain.agent_run import AgentRunFailure
+from enterprise_chat_platform.domain.assistant_profile import (
+    AssistantProfile,
+    AssistantProfileRef,
+    PromptCommunicationStyle,
+    PromptExpertiseLevel,
+    PromptResponseTone,
+)
 from enterprise_chat_platform.domain.governance import (
     PolicyAction,
     PolicyAssessment,
@@ -33,6 +41,7 @@ from enterprise_chat_platform.domain.governance import (
 )
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
     EventId,
     MessageId,
@@ -40,12 +49,14 @@ from enterprise_chat_platform.domain.identifiers import (
     UserId,
 )
 from enterprise_chat_platform.domain.prompting import (
+    ENTERPRISE_CHAT_PROMPT_VERSION,
     PromptPlan,
     PromptRole,
     PromptTurn,
 )
 
 TENANT_ID = TenantId.parse("11111111-1111-4111-8111-111111111111")
+OTHER_TENANT_ID = TenantId.parse("99999999-9999-4999-8999-999999999999")
 CONVERSATION_ID = ConversationId.parse("22222222-2222-4222-8222-222222222222")
 RUN_ID = AgentRunId.parse("33333333-3333-4333-8333-333333333333")
 INPUT_MESSAGE_ID = MessageId.parse("44444444-4444-4444-8444-444444444444")
@@ -56,6 +67,22 @@ LEASE_TOKEN = UUID("88888888-8888-4888-8888-888888888888")
 STARTED_AT = datetime(2026, 11, 13, 17, 0, tzinfo=UTC)
 ASSESSED_AT = STARTED_AT + timedelta(milliseconds=500)
 FINISHED_AT = STARTED_AT + timedelta(seconds=1)
+ASSISTANT_PROFILE = AssistantProfile(
+    tenant_id=TENANT_ID,
+    ref=AssistantProfileRef(
+        id=AssistantProfileId.parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        version=3,
+    ),
+    prompt_template_version=ENTERPRISE_CHAT_PROMPT_VERSION,
+    assistant_name="Acme Assistant",
+    organization_name="Acme Corp",
+    response_tone=PromptResponseTone.PROFESSIONAL,
+    expertise=PromptExpertiseLevel.SENIOR_ENGINEER,
+    communication_style=PromptCommunicationStyle.DIRECT_HELPFUL,
+    context_character_limit=4_096,
+    created_at=STARTED_AT - timedelta(days=1),
+    created_by=SERVICE_AUTHOR_ID,
+)
 ALLOW_ASSESSMENT = PolicyAssessment(
     action=PolicyAction.ALLOW,
     risk_score=0,
@@ -91,6 +118,7 @@ def _job(
     *,
     attempt_count: int = 1,
     context_messages: tuple[PromptTurn, ...] = (),
+    assistant_profile: AssistantProfile = ASSISTANT_PROFILE,
 ) -> ClaimedAgentRun:
     return ClaimedAgentRun(
         event_id=EVENT_ID,
@@ -99,6 +127,7 @@ def _job(
         agent_run_id=RUN_ID,
         input_message_id=INPUT_MESSAGE_ID,
         input_content="How does a transactional outbox work?",
+        assistant_profile=assistant_profile,
         lease_token=LEASE_TOKEN,
         attempt_count=attempt_count,
         context_messages=context_messages,
@@ -218,15 +247,15 @@ class StaticInputPolicy:
 class RecordingPromptBuilder:
     def __init__(self, plan: PromptPlan) -> None:
         self.plan = plan
-        self.calls: list[tuple[TenantId, tuple[PromptTurn, ...]]] = []
+        self.calls: list[tuple[AssistantProfile, tuple[PromptTurn, ...]]] = []
 
     def build(
         self,
         *,
-        tenant_id: TenantId,
+        profile: AssistantProfile,
         context_messages: tuple[PromptTurn, ...],
     ) -> PromptPlan:
-        self.calls.append((tenant_id, context_messages))
+        self.calls.append((profile, context_messages))
         return self.plan
 
 
@@ -258,6 +287,16 @@ def test_provider_request_and_claimed_job_repr_hide_message_content() -> None:
 
     assert "How does a transactional outbox work?" not in repr(job)
     assert "private-current-message" not in repr(request)
+
+
+def test_claimed_job_rejects_cross_tenant_assistant_profile() -> None:
+    with pytest.raises(ValueError, match="profile must belong to the job tenant"):
+        _job(
+            assistant_profile=replace(
+                ASSISTANT_PROFILE,
+                tenant_id=OTHER_TENANT_ID,
+            )
+        )
 
 
 def _config(
@@ -366,7 +405,7 @@ async def test_versioned_prompt_is_built_from_claimed_context_with_current_input
     )
 
     assert await worker.process_next() is AgentRunWorkResult.SUCCEEDED
-    assert prompt_builder.calls == [(TENANT_ID, context)]
+    assert prompt_builder.calls == [(ASSISTANT_PROFILE, context)]
     assert provider.requests == [
         ChatRequest(
             tenant_id=TENANT_ID,

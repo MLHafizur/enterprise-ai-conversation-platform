@@ -8,8 +8,10 @@ from enterprise_chat_platform.domain.agent_run import (
     AgentRunFailure,
     AgentRunStatus,
 )
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfileRef
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
     MessageId,
     TenantId,
@@ -26,6 +28,7 @@ CONVERSATION_UUID = UUID("22222222-2222-4222-8222-222222222222")
 INPUT_MESSAGE_UUID = UUID("33333333-3333-4333-8333-333333333333")
 OUTPUT_MESSAGE_UUID = UUID("44444444-4444-4444-8444-444444444444")
 AGENT_RUN_UUID = UUID("55555555-5555-4555-8555-555555555555")
+ASSISTANT_PROFILE_UUID = UUID("66666666-6666-4666-8666-666666666666")
 
 CREATED_AT = datetime(2026, 11, 13, 15, 0, tzinfo=UTC)
 STARTED_AT = CREATED_AT + timedelta(seconds=1)
@@ -38,6 +41,10 @@ def _queued_run() -> AgentRun:
         tenant_id=TenantId(TENANT_UUID),
         conversation_id=ConversationId(CONVERSATION_UUID),
         input_message_id=MessageId(INPUT_MESSAGE_UUID),
+        assistant_profile_ref=AssistantProfileRef(
+            id=AssistantProfileId(ASSISTANT_PROFILE_UUID),
+            version=3,
+        ),
         created_at=CREATED_AT,
     )
 
@@ -50,6 +57,8 @@ def test_queued_agent_run_maps_every_base_field() -> None:
     assert record.id == AGENT_RUN_UUID
     assert record.conversation_id == CONVERSATION_UUID
     assert record.input_message_id == INPUT_MESSAGE_UUID
+    assert record.assistant_profile_id == ASSISTANT_PROFILE_UUID
+    assert record.assistant_profile_version == 3
     assert record.status == AgentRunStatus.QUEUED.value
     assert record.created_at == CREATED_AT
 

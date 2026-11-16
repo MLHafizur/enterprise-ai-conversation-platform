@@ -26,6 +26,13 @@ from enterprise_chat_platform.application.realtime_events import (
     AGENT_RUN_TERMINAL_PAYLOAD_FIELDS,
 )
 from enterprise_chat_platform.domain.agent_run import AgentRunFailure, AgentRunStatus
+from enterprise_chat_platform.domain.assistant_profile import (
+    AssistantProfile,
+    AssistantProfileRef,
+    PromptCommunicationStyle,
+    PromptExpertiseLevel,
+    PromptResponseTone,
+)
 from enterprise_chat_platform.domain.chat import Conversation, MessageRole
 from enterprise_chat_platform.domain.conversation_policy import (
     CONVERSATION_INPUT_POLICY_VERSION,
@@ -34,6 +41,7 @@ from enterprise_chat_platform.domain.conversation_policy import (
 from enterprise_chat_platform.domain.governance import PolicyAction
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
     EventId,
     MessageId,
@@ -41,6 +49,7 @@ from enterprise_chat_platform.domain.identifiers import (
     UserId,
 )
 from enterprise_chat_platform.domain.primitives import IdempotencyKey
+from enterprise_chat_platform.domain.prompting import ENTERPRISE_CHAT_PROMPT_VERSION
 from enterprise_chat_platform.infrastructure.persistence.agent_run_job_store import (
     SqlAlchemyAgentRunJobStore,
 )
@@ -51,6 +60,9 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 )
 from enterprise_chat_platform.infrastructure.persistence.mappers.agent_run import (
     agent_run_to_new_record,
+)
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_to_record,
 )
 from enterprise_chat_platform.infrastructure.persistence.mappers.conversation import (
     conversation_to_new_record,
@@ -63,11 +75,13 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.outbox_event im
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     HumanReviewRecord,
     InputPolicyAssessmentRecord,
     MessageRecord,
     OutboxEventRecord,
+    TenantAssistantProfileAssignmentRecord,
 )
 from enterprise_chat_platform.infrastructure.persistence.notification_relay_store import (
     SqlAlchemyNotificationRelayStore,
@@ -172,6 +186,19 @@ async def _seed_job(
     conversation_id = ConversationId.new()
     actor_id = UserId.new()
     service_author_id = UserId.new()
+    profile = AssistantProfile(
+        tenant_id=tenant_id,
+        ref=AssistantProfileRef(id=AssistantProfileId.new(), version=1),
+        prompt_template_version=ENTERPRISE_CHAT_PROMPT_VERSION,
+        assistant_name="Worker Assistant",
+        organization_name="Worker Test",
+        response_tone=PromptResponseTone.PROFESSIONAL,
+        expertise=PromptExpertiseLevel.SENIOR_ENGINEER,
+        communication_style=PromptCommunicationStyle.DIRECT_HELPFUL,
+        context_character_limit=4_096,
+        created_at=ACCEPTED_AT,
+        created_by=actor_id,
+    )
     conversation = Conversation.create(
         id=conversation_id,
         tenant_id=tenant_id,
@@ -183,6 +210,7 @@ async def _seed_job(
         actor_id=actor_id,
         message_id=MessageId.new(),
         agent_run_id=AgentRunId.new(),
+        assistant_profile_ref=profile.ref,
         content=content,
         idempotency_key=IdempotencyKey("worker-integration-request"),
         at=ACCEPTED_AT,
@@ -198,6 +226,18 @@ async def _seed_job(
     )
 
     async with session_factory() as session, session.begin():
+        session.add(assistant_profile_to_record(profile))
+        session.add(
+            TenantAssistantProfileAssignmentRecord(
+                tenant_id=tenant_id.value,
+                profile_id=profile.ref.id.value,
+                profile_version=profile.ref.version,
+                revision=0,
+                activated_at=ACCEPTED_AT,
+                activated_by=actor_id.value,
+            )
+        )
+        await session.flush()
         session.add(conversation_to_new_record(accepted.updated_conversation))
         await session.flush()
         session.add(message_to_new_record(accepted.message))
@@ -253,6 +293,16 @@ async def _cleanup_job(
                 delete(ConversationRecord).where(
                     ConversationRecord.tenant_id == event.tenant_id.value,
                     ConversationRecord.id == event.conversation_id.value,
+                )
+            )
+            await session.execute(
+                delete(TenantAssistantProfileAssignmentRecord).where(
+                    TenantAssistantProfileAssignmentRecord.tenant_id == event.tenant_id.value,
+                )
+            )
+            await session.execute(
+                delete(AssistantProfileVersionRecord).where(
+                    AssistantProfileVersionRecord.tenant_id == event.tenant_id.value,
                 )
             )
     finally:
@@ -543,6 +593,7 @@ async def test_expired_lease_is_reclaimable_without_resetting_running_run() -> N
             assert reclaimed is not None
             assert reclaimed.lease_token != first.lease_token
             assert reclaimed.attempt_count == 2
+            assert reclaimed.assistant_profile == first.assistant_profile
 
             async with session_factory() as session:
                 running_count = await session.scalar(

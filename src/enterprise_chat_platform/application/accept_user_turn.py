@@ -14,6 +14,8 @@ from enterprise_chat_platform.application.errors import (
     ConversationNotFoundError,
     IdempotencyConflictError,
 )
+from enterprise_chat_platform.application.tenant_catalog import default_assistant_profile
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfile
 from enterprise_chat_platform.domain.chat import AcceptedUserTurn, Conversation
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
@@ -151,6 +153,13 @@ class AcceptUserTurnUnitOfWork(Protocol):
         scope: IdempotencyScope,
     ) -> IdempotencyReceipt | None: ...
 
+    async def get_or_create_active_assistant_profile(
+        self,
+        *,
+        tenant_id: TenantId,
+        default_profile: AssistantProfile,
+    ) -> AssistantProfile: ...
+
     def stage_accepted_turn(
         self,
         *,
@@ -228,6 +237,16 @@ class AcceptUserTurnHandler:
                 )
 
             accepted_at = self._clock.now()
+            profile = await unit_of_work.get_or_create_active_assistant_profile(
+                tenant_id=actor.tenant_id,
+                default_profile=default_assistant_profile(
+                    tenant_id=actor.tenant_id,
+                    created_at=accepted_at,
+                ),
+            )
+            if profile.tenant_id != actor.tenant_id:
+                raise RuntimeError("Active assistant profile belongs to another tenant")
+
             expected_version = conversation.version
 
             accepted_turn = conversation.accept_user_turn(
@@ -235,6 +254,7 @@ class AcceptUserTurnHandler:
                 actor_id=actor.actor_id,
                 message_id=self._ids.new_message_id(),
                 agent_run_id=self._ids.new_agent_run_id(),
+                assistant_profile_ref=profile.ref,
                 content=command.content,
                 idempotency_key=command.idempotency_key,
                 at=accepted_at,

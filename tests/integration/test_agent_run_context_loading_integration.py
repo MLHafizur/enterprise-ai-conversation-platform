@@ -5,13 +5,20 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from enterprise_chat_platform.application.accept_user_turn import AgentRunQueuedEvent
 from enterprise_chat_platform.domain.agent_run import AgentRun, AgentRunFailure
+from enterprise_chat_platform.domain.assistant_profile import (
+    AssistantProfile,
+    AssistantProfileRef,
+    PromptCommunicationStyle,
+    PromptExpertiseLevel,
+    PromptResponseTone,
+)
 from enterprise_chat_platform.domain.chat import (
     Conversation,
     ConversationStatus,
@@ -26,6 +33,7 @@ from enterprise_chat_platform.domain.governance import (
 )
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
     EventId,
     MessageId,
@@ -33,7 +41,7 @@ from enterprise_chat_platform.domain.identifiers import (
     UserId,
 )
 from enterprise_chat_platform.domain.primitives import IdempotencyKey
-from enterprise_chat_platform.domain.prompting import PromptRole
+from enterprise_chat_platform.domain.prompting import ENTERPRISE_CHAT_PROMPT_VERSION, PromptRole
 from enterprise_chat_platform.infrastructure.persistence.agent_run_job_store import (
     SqlAlchemyAgentRunJobStore,
 )
@@ -44,6 +52,9 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 )
 from enterprise_chat_platform.infrastructure.persistence.mappers.agent_run import (
     agent_run_to_new_record,
+)
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_to_record,
 )
 from enterprise_chat_platform.infrastructure.persistence.mappers.conversation import (
     conversation_to_new_record,
@@ -59,10 +70,12 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.outbox_event im
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     InputPolicyAssessmentRecord,
     MessageRecord,
     OutboxEventRecord,
+    TenantAssistantProfileAssignmentRecord,
 )
 from enterprise_chat_platform.settings import MigrationSettings, Settings
 
@@ -121,6 +134,33 @@ async def _seed_job(
     conversation_id = ConversationId.new()
     actor_id = UserId.new()
     assistant_id = UserId.new()
+    profile_id = AssistantProfileId.new()
+    profile = AssistantProfile(
+        tenant_id=tenant_id,
+        ref=AssistantProfileRef(id=profile_id, version=1),
+        prompt_template_version=ENTERPRISE_CHAT_PROMPT_VERSION,
+        assistant_name="Context Assistant",
+        organization_name="Context Test",
+        response_tone=PromptResponseTone.PROFESSIONAL,
+        expertise=PromptExpertiseLevel.SENIOR_ENGINEER,
+        communication_style=PromptCommunicationStyle.DIRECT_HELPFUL,
+        context_character_limit=4_096,
+        created_at=ACCEPTED_AT,
+        created_by=actor_id,
+    )
+    next_profile = AssistantProfile(
+        tenant_id=tenant_id,
+        ref=AssistantProfileRef(id=profile_id, version=2),
+        prompt_template_version=ENTERPRISE_CHAT_PROMPT_VERSION,
+        assistant_name="New Context Assistant",
+        organization_name="Context Test",
+        response_tone=PromptResponseTone.FRIENDLY,
+        expertise=PromptExpertiseLevel.PRODUCT_SPECIALIST,
+        communication_style=PromptCommunicationStyle.CONCISE_SUPPORTIVE,
+        context_character_limit=2_048,
+        created_at=ACCEPTED_AT + timedelta(seconds=1),
+        created_by=actor_id,
+    )
     input_sequence = len(history) + 1
 
     message_specs = [*history, (MessageRole.USER, "current-input")]
@@ -158,6 +198,7 @@ async def _seed_job(
         tenant_id=tenant_id,
         conversation_id=conversation_id,
         input_message_id=input_message.id,
+        assistant_profile_ref=profile.ref,
         created_at=input_message.created_at,
     )
     event = AgentRunQueuedEvent(
@@ -198,6 +239,7 @@ async def _seed_job(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             input_message_id=message.id,
+            assistant_profile_ref=profile.ref,
             created_at=message.created_at,
         )
         action = configured_actions.get(message.sequence)
@@ -266,6 +308,20 @@ async def _seed_job(
             cleanup_targets.append((distractor_tenant_id, distractor_conversation_id))
 
     async with session_factory() as session, session.begin():
+        session.add(assistant_profile_to_record(profile))
+        session.add(assistant_profile_to_record(next_profile))
+        session.add(
+            TenantAssistantProfileAssignmentRecord(
+                tenant_id=tenant_id.value,
+                profile_id=profile.ref.id.value,
+                profile_version=profile.ref.version,
+                revision=0,
+                activated_at=ACCEPTED_AT,
+                activated_by=actor_id.value,
+            )
+        )
+        await session.flush()
+
         session.add(conversation_to_new_record(conversation))
         for distractor_conversation in distractor_conversations:
             session.add(conversation_to_new_record(distractor_conversation))
@@ -366,6 +422,16 @@ async def _cleanup(
                         ConversationRecord.id == conversation_id.value,
                     )
                 )
+            await session.execute(
+                delete(TenantAssistantProfileAssignmentRecord).where(
+                    TenantAssistantProfileAssignmentRecord.tenant_id == event.tenant_id.value,
+                )
+            )
+            await session.execute(
+                delete(AssistantProfileVersionRecord).where(
+                    AssistantProfileVersionRecord.tenant_id == event.tenant_id.value,
+                )
+            )
     finally:
         await engine.dispose()
 
@@ -393,12 +459,26 @@ async def test_claim_loads_bounded_prior_context_in_chronological_order() -> Non
                 now=ACCEPTED_AT + timedelta(seconds=20),
                 lease_duration=timedelta(seconds=5),
             )
+            assert first is not None
+            async with session_factory() as session, session.begin():
+                await session.execute(
+                    update(TenantAssistantProfileAssignmentRecord)
+                    .where(
+                        TenantAssistantProfileAssignmentRecord.tenant_id == first.tenant_id.value,
+                        TenantAssistantProfileAssignmentRecord.profile_id
+                        == first.assistant_profile.ref.id.value,
+                    )
+                    .values(
+                        profile_version=2,
+                        revision=1,
+                        activated_at=ACCEPTED_AT + timedelta(seconds=21),
+                    )
+                )
             reclaimed = await store.claim_next(
                 now=ACCEPTED_AT + timedelta(seconds=26),
                 lease_duration=timedelta(seconds=5),
             )
 
-        assert first is not None
         assert first.input_content == "current-input"
         assert [(turn.sequence, turn.role, turn.content) for turn in first.context_messages] == [
             (2, PromptRole.ASSISTANT, "history-2"),
@@ -415,6 +495,8 @@ async def test_claim_loads_bounded_prior_context_in_chronological_order() -> Non
         assert reclaimed is not None
         assert reclaimed.attempt_count == 2
         assert reclaimed.context_messages == first.context_messages
+        assert reclaimed.assistant_profile == first.assistant_profile
+        assert reclaimed.assistant_profile.ref.version == 1
     finally:
         await _cleanup(event=event, targets=cleanup_targets)
         await engine.dispose()
@@ -487,6 +569,7 @@ async def test_claim_excludes_history_without_positive_security_proofs() -> None
         assert reclaimed is not None
         assert reclaimed.attempt_count == 2
         assert reclaimed.context_messages == first.context_messages
+        assert reclaimed.assistant_profile == first.assistant_profile
     finally:
         await _cleanup(event=event, targets=cleanup_targets)
         await engine.dispose()
@@ -511,6 +594,7 @@ async def test_claim_uses_empty_context_for_first_message() -> None:
         assert job is not None
         assert job.input_content == "current-input"
         assert job.context_messages == ()
+        assert job.assistant_profile.ref.version == 1
     finally:
         await _cleanup(event=event, targets=cleanup_targets)
         await engine.dispose()

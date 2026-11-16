@@ -1,30 +1,53 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from enterprise_chat_platform.application.process_agent_run import ClaimedAgentRun
+from enterprise_chat_platform.domain.assistant_profile import (
+    AssistantProfile,
+    AssistantProfileRef,
+    PromptCommunicationStyle,
+    PromptExpertiseLevel,
+    PromptResponseTone,
+)
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
-    EventId,
     MessageId,
     TenantId,
+    UserId,
 )
-from enterprise_chat_platform.domain.prompting import PromptRole
+from enterprise_chat_platform.domain.prompting import (
+    ENTERPRISE_CHAT_PROMPT_VERSION,
+    PromptRole,
+)
 from enterprise_chat_platform.infrastructure.persistence.agent_run_job_store import (
     DEFAULT_HISTORY_ROW_CAP,
     MAX_HISTORY_ROW_CAP,
     SqlAlchemyAgentRunJobStore,
     _context_messages_statement,
+    _pinned_assistant_profile_statement,
     _prompt_turn_from_record,
+    _select_pinned_assistant_profile,
 )
 from enterprise_chat_platform.infrastructure.persistence.database import (
     AsyncSessionFactory,
 )
-from enterprise_chat_platform.infrastructure.persistence.models import MessageRecord
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_to_record,
+)
+from enterprise_chat_platform.infrastructure.persistence.models import (
+    AgentRunRecord,
+    MessageRecord,
+)
+
+CREATED_AT = datetime(2026, 11, 16, 19, 0, tzinfo=UTC)
 
 
 def _session_factory() -> AsyncSessionFactory:
@@ -44,16 +67,36 @@ def _record(*, role: str, sequence: int = 7) -> MessageRecord:
     )
 
 
-def _job() -> ClaimedAgentRun:
-    return ClaimedAgentRun(
-        event_id=EventId.new(),
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _JobScope:
+    tenant_id: TenantId
+    conversation_id: ConversationId
+    agent_run_id: AgentRunId
+    input_message_id: MessageId
+
+
+def _job() -> _JobScope:
+    return _JobScope(
         tenant_id=TenantId.new(),
         conversation_id=ConversationId.new(),
         agent_run_id=AgentRunId.new(),
         input_message_id=MessageId.new(),
-        input_content="current input",
-        lease_token=uuid4(),
-        attempt_count=1,
+    )
+
+
+def _profile(*, tenant_id: TenantId) -> AssistantProfile:
+    return AssistantProfile(
+        tenant_id=tenant_id,
+        ref=AssistantProfileRef(id=AssistantProfileId.new(), version=3),
+        prompt_template_version=ENTERPRISE_CHAT_PROMPT_VERSION,
+        assistant_name="Pinned Assistant",
+        organization_name="Pinned Organization",
+        response_tone=PromptResponseTone.PROFESSIONAL,
+        expertise=PromptExpertiseLevel.SENIOR_ENGINEER,
+        communication_style=PromptCommunicationStyle.DIRECT_HELPFUL,
+        context_character_limit=4_096,
+        created_at=CREATED_AT,
+        created_by=UserId.new(),
     )
 
 
@@ -147,3 +190,63 @@ def test_context_query_requires_positive_policy_and_lifecycle_proofs() -> None:
     assert "chat.agent_runs.status = 'succeeded'" in sql
     assert "ORDER BY chat.messages.sequence DESC" in sql
     assert "LIMIT 7" in sql
+
+
+def test_profile_query_uses_the_exact_tenant_scoped_run_pin() -> None:
+    tenant_id = uuid4()
+    profile_id = uuid4()
+    statement = _pinned_assistant_profile_statement(
+        tenant_id=tenant_id,
+        profile_id=profile_id,
+        profile_version=7,
+    )
+
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),  # type: ignore[no-untyped-call]
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert f"assistant_profile_versions.tenant_id = '{tenant_id}'" in sql
+    assert f"assistant_profile_versions.profile_id = '{profile_id}'" in sql
+    assert "assistant_profile_versions.version = 7" in sql
+    assert "tenant_assistant_profile_assignments" not in sql
+
+
+@pytest.mark.asyncio
+async def test_missing_pinned_profile_fails_closed() -> None:
+    session = MagicMock(spec=AsyncSession)
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=result)
+    run_record = MagicMock(spec=AgentRunRecord)
+    run_record.tenant_id = uuid4()
+    run_record.assistant_profile_id = uuid4()
+    run_record.assistant_profile_version = 2
+
+    with pytest.raises(RuntimeError, match="missing or mismatched assistant profile"):
+        await _select_pinned_assistant_profile(
+            session=cast(AsyncSession, session),
+            run_record=run_record,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cross_tenant_pinned_profile_fails_closed() -> None:
+    run_tenant_id = uuid4()
+    other_profile = _profile(tenant_id=TenantId.new())
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = assistant_profile_to_record(other_profile)
+    session = MagicMock(spec=AsyncSession)
+    session.execute = AsyncMock(return_value=result)
+    run_record = MagicMock(spec=AgentRunRecord)
+    run_record.tenant_id = run_tenant_id
+    run_record.assistant_profile_id = other_profile.ref.id.value
+    run_record.assistant_profile_version = other_profile.ref.version
+
+    with pytest.raises(RuntimeError, match="cross-tenant assistant profile"):
+        await _select_pinned_assistant_profile(
+            session=cast(AsyncSession, session),
+            run_record=run_record,
+        )

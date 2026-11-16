@@ -4,9 +4,11 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     String,
     UniqueConstraint,
     Uuid,
@@ -45,6 +47,14 @@ class AgentRunRecord(Base):
         Uuid(as_uuid=True),
         nullable=False,
     )
+    assistant_profile_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+    )
+    assistant_profile_version: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
     status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -75,6 +85,20 @@ class AgentRunRecord(Base):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "assistant_profile_id",
+                "assistant_profile_version",
+            ],
+            [
+                f"{APP_SCHEMA}.assistant_profile_versions.tenant_id",
+                f"{APP_SCHEMA}.assistant_profile_versions.profile_id",
+                f"{APP_SCHEMA}.assistant_profile_versions.version",
+            ],
+            name="fk_agent_runs_assistant_profile",
+            ondelete="RESTRICT",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"],
             [
@@ -116,6 +140,16 @@ class AgentRunRecord(Base):
             "tenant_id",
             "conversation_id",
             "id",
+        ),
+        Index(
+            "ix_agent_runs_tenant_assistant_profile",
+            "tenant_id",
+            "assistant_profile_id",
+            "assistant_profile_version",
+        ),
+        CheckConstraint(
+            "assistant_profile_version > 0",
+            name="assistant_profile_version_positive",
         ),
         CheckConstraint(
             (

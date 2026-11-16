@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
@@ -29,6 +31,7 @@ from enterprise_chat_platform.domain.agent_run import (
     AgentRunFailure,
     AgentRunStatus,
 )
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfile
 from enterprise_chat_platform.domain.chat import MessageRole
 from enterprise_chat_platform.domain.governance import PolicyAction, PolicyAssessment
 from enterprise_chat_platform.domain.identifiers import (
@@ -47,11 +50,15 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 from enterprise_chat_platform.infrastructure.persistence.mappers.agent_run import (
     agent_run_from_record,
 )
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_from_record,
+)
 from enterprise_chat_platform.infrastructure.persistence.mappers.conversation import (
     conversation_from_record,
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     InputPolicyAssessmentRecord,
     MessageRecord,
@@ -75,6 +82,35 @@ from enterprise_chat_platform.infrastructure.persistence.repositories.message im
 
 DEFAULT_HISTORY_ROW_CAP = 20
 MAX_HISTORY_ROW_CAP = 50
+
+
+class _AgentRunScope(Protocol):
+    """Tenant-scoped identifiers shared by a queued reference and claimed job."""
+
+    @property
+    def tenant_id(self) -> TenantId: ...
+
+    @property
+    def conversation_id(self) -> ConversationId: ...
+
+    @property
+    def agent_run_id(self) -> AgentRunId: ...
+
+    @property
+    def input_message_id(self) -> MessageId: ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _QueuedAgentRunReference:
+    """Validated outbox identifiers before provider inputs have been loaded."""
+
+    event_id: EventId
+    tenant_id: TenantId
+    conversation_id: ConversationId
+    agent_run_id: AgentRunId
+    input_message_id: MessageId
+    lease_token: UUID
+    attempt_count: int
 
 
 class SqlAlchemyAgentRunJobStore:
@@ -121,15 +157,13 @@ class SqlAlchemyAgentRunJobStore:
                 record.lease_token = lease_token
                 record.lease_expires_at = claimed_at + lease_duration
 
-                job = _job_from_record(
+                reference = _reference_from_record(
                     record=record,
                     lease_token=lease_token,
-                    input_content="",
-                    context_messages=(),
                 )
                 run_record = await _select_run_for_update(
                     session=session,
-                    job=job,
+                    job=reference,
                 )
                 run = agent_run_from_record(run_record)
 
@@ -145,24 +179,29 @@ class SqlAlchemyAgentRunJobStore:
 
                 input_record = await _select_input_message(
                     session=session,
-                    job=job,
+                    job=reference,
                 )
                 if input_record.role != MessageRole.USER.value:
                     raise RuntimeError("Agent run input must reference a user message")
 
                 context_messages = await _select_context_messages(
                     session=session,
-                    job=job,
+                    job=reference,
                     input_sequence=input_record.sequence,
                     input_created_at=input_record.created_at,
                     row_cap=self._history_row_cap,
                 )
 
-                return _job_from_record(
-                    record=record,
-                    lease_token=lease_token,
+                assistant_profile = await _select_pinned_assistant_profile(
+                    session=session,
+                    run_record=run_record,
+                )
+
+                return _job_from_reference(
+                    reference=reference,
                     input_content=input_record.content,
                     context_messages=context_messages,
+                    assistant_profile=assistant_profile,
                 )
 
     async def complete(
@@ -518,7 +557,7 @@ async def _lock_owned_event(
 async def _select_run_for_update(
     *,
     session: AsyncSession,
-    job: ClaimedAgentRun,
+    job: _AgentRunScope,
 ) -> AgentRunRecord:
     statement = (
         select(AgentRunRecord)
@@ -540,7 +579,7 @@ async def _select_run_for_update(
 async def _select_input_message(
     *,
     session: AsyncSession,
-    job: ClaimedAgentRun,
+    job: _AgentRunScope,
 ) -> MessageRecord:
     statement = select(MessageRecord).where(
         MessageRecord.tenant_id == job.tenant_id.value,
@@ -557,7 +596,7 @@ async def _select_input_message(
 async def _select_context_messages(
     *,
     session: AsyncSession,
-    job: ClaimedAgentRun,
+    job: _AgentRunScope,
     input_sequence: int,
     input_created_at: datetime,
     row_cap: int,
@@ -576,7 +615,7 @@ async def _select_context_messages(
 
 def _context_messages_statement(
     *,
-    job: ClaimedAgentRun,
+    job: _AgentRunScope,
     input_sequence: int,
     input_created_at: datetime,
     row_cap: int,
@@ -684,13 +723,48 @@ async def _select_conversation_for_update(
     return record
 
 
-def _job_from_record(
+async def _select_pinned_assistant_profile(
+    *,
+    session: AsyncSession,
+    run_record: AgentRunRecord,
+) -> AssistantProfile:
+    """Load the exact immutable profile version pinned when the run was queued."""
+    statement = _pinned_assistant_profile_statement(
+        tenant_id=run_record.tenant_id,
+        profile_id=run_record.assistant_profile_id,
+        profile_version=run_record.assistant_profile_version,
+    )
+    result = await session.execute(statement)
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise RuntimeError("Agent run references a missing or mismatched assistant profile")
+
+    profile = assistant_profile_from_record(record)
+    if profile.tenant_id.value != run_record.tenant_id:
+        raise RuntimeError("Agent run references a cross-tenant assistant profile")
+    return profile
+
+
+def _pinned_assistant_profile_statement(
+    *,
+    tenant_id: UUID,
+    profile_id: UUID,
+    profile_version: int,
+) -> Select[AssistantProfileVersionRecord]:
+    """Build the exact pin lookup without consulting the active assignment."""
+    return select(AssistantProfileVersionRecord).where(
+        AssistantProfileVersionRecord.tenant_id == tenant_id,
+        AssistantProfileVersionRecord.profile_id == profile_id,
+        AssistantProfileVersionRecord.version == profile_version,
+    )
+
+
+def _reference_from_record(
     *,
     record: OutboxEventRecord,
     lease_token: UUID,
-    input_content: str,
-    context_messages: tuple[PromptTurn, ...],
-) -> ClaimedAgentRun:
+) -> _QueuedAgentRunReference:
+    """Validate the queued event before loading its referenced database rows."""
     payload = record.payload
     agent_run_id = _payload_uuid(payload=payload, key="agent_run_id")
     input_message_id = _payload_uuid(payload=payload, key="input_message_id")
@@ -698,16 +772,36 @@ def _job_from_record(
     if record.schema_version != 1:
         raise RuntimeError("Unsupported queued-event schema version")
 
-    return ClaimedAgentRun(
+    return _QueuedAgentRunReference(
         event_id=EventId(record.id),
         tenant_id=TenantId(record.tenant_id),
         conversation_id=ConversationId(record.aggregate_id),
         agent_run_id=AgentRunId(agent_run_id),
         input_message_id=MessageId(input_message_id),
-        input_content=input_content,
-        context_messages=context_messages,
         lease_token=lease_token,
         attempt_count=record.attempt_count,
+    )
+
+
+def _job_from_reference(
+    *,
+    reference: _QueuedAgentRunReference,
+    input_content: str,
+    context_messages: tuple[PromptTurn, ...],
+    assistant_profile: AssistantProfile,
+) -> ClaimedAgentRun:
+    """Combine durable, validated provider inputs into one claimed job."""
+    return ClaimedAgentRun(
+        event_id=reference.event_id,
+        tenant_id=reference.tenant_id,
+        conversation_id=reference.conversation_id,
+        agent_run_id=reference.agent_run_id,
+        input_message_id=reference.input_message_id,
+        input_content=input_content,
+        assistant_profile=assistant_profile,
+        context_messages=context_messages,
+        lease_token=reference.lease_token,
+        attempt_count=reference.attempt_count,
     )
 
 

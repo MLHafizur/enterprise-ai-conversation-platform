@@ -6,6 +6,10 @@ from enterprise_chat_platform.infrastructure.persistence.metadata import Base
 from enterprise_chat_platform.infrastructure.persistence.models.agent_run import (
     AgentRunRecord,
 )
+from enterprise_chat_platform.infrastructure.persistence.models.assistant_profile import (
+    AssistantProfileVersionRecord,
+    TenantAssistantProfileAssignmentRecord,
+)
 from enterprise_chat_platform.infrastructure.persistence.models.conversation import (
     ConversationRecord,
 )
@@ -33,11 +37,13 @@ def registered_model_metadata() -> MetaData:
 
 __all__ = [
     "AgentRunRecord",
+    "AssistantProfileVersionRecord",
     "ConversationRecord",
     "IdempotencyReceiptRecord",
     "HumanReviewRecord",
     "MessageRecord",
     "OutboxEventRecord",
+    "TenantAssistantProfileAssignmentRecord",
     "registered_model_metadata",
     "InputPolicyAssessmentRecord",
 ]

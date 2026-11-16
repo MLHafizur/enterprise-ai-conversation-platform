@@ -1,6 +1,7 @@
 from typing import cast
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
@@ -40,6 +41,8 @@ def test_agent_run_record_has_expected_table_shape() -> None:
         "id",
         "conversation_id",
         "input_message_id",
+        "assistant_profile_id",
+        "assistant_profile_version",
         "status",
         "created_at",
         "started_at",
@@ -67,6 +70,7 @@ def test_agent_run_record_has_expected_table_shape() -> None:
         "id",
         "conversation_id",
         "input_message_id",
+        "assistant_profile_id",
         "output_message_id",
     ):
         assert isinstance(table.c[column_name].type, Uuid)
@@ -74,6 +78,7 @@ def test_agent_run_record_has_expected_table_shape() -> None:
     status_type = table.c.status.type
     assert isinstance(status_type, String)
     assert status_type.length == 16
+    assert isinstance(table.c.assistant_profile_version.type, BigInteger)
 
     failure_code_type = table.c.failure_code.type
     assert isinstance(failure_code_type, String)
@@ -107,6 +112,19 @@ def test_agent_run_record_has_tenant_and_conversation_safe_relationships() -> No
     }
 
     assert foreign_keys == {
+        "fk_agent_runs_assistant_profile": (
+            (
+                "tenant_id",
+                "assistant_profile_id",
+                "assistant_profile_version",
+            ),
+            (
+                "chat.assistant_profile_versions.tenant_id",
+                "chat.assistant_profile_versions.profile_id",
+                "chat.assistant_profile_versions.version",
+            ),
+            "RESTRICT",
+        ),
         "fk_agent_runs_conversation": (
             (
                 "tenant_id",
@@ -157,6 +175,7 @@ def test_agent_run_record_preserves_lifecycle_invariants() -> None:
     }
 
     assert set(checks) == {
+        "ck_agent_runs_assistant_profile_version_positive",
         "ck_agent_runs_status_valid",
         "ck_agent_runs_timestamps_ordered",
         "ck_agent_runs_failure_code_valid",
@@ -182,6 +201,21 @@ def test_agent_run_record_preserves_lifecycle_invariants() -> None:
 
     for status in AgentRunStatus:
         assert f"status = '{status.value}'" in lifecycle_check
+
+
+def test_agent_run_profile_pin_has_supporting_tenant_index() -> None:
+    indexes = {
+        str(index.name): tuple(column.name for column in index.columns)
+        for index in _agent_run_table().indexes
+    }
+
+    assert indexes == {
+        "ix_agent_runs_tenant_assistant_profile": (
+            "tenant_id",
+            "assistant_profile_id",
+            "assistant_profile_version",
+        )
+    }
 
 
 def test_model_registry_exposes_agent_runs_to_migrations() -> None:

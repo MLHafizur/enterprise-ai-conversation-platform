@@ -12,6 +12,11 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from enterprise_chat_platform.domain.assistant_profile import (
+    PromptCommunicationStyle,
+    PromptExpertiseLevel,
+    PromptResponseTone,
+)
 from enterprise_chat_platform.domain.chat import MAX_USER_MESSAGE_LENGTH
 from enterprise_chat_platform.domain.errors import DomainValidationError
 
@@ -19,26 +24,22 @@ ENTERPRISE_CHAT_PROMPT_VERSION = "enterprise-chat.v1"
 MAX_SYSTEM_INSTRUCTION_LENGTH = 4_096
 _PROMPT_VERSION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
+__all__ = [
+    "ENTERPRISE_CHAT_PROMPT_VERSION",
+    "PromptCommunicationStyle",
+    "PromptExpertiseLevel",
+    "PromptPlan",
+    "PromptResponseTone",
+    "PromptRole",
+    "PromptTurn",
+]
+
 
 class PromptRole(StrEnum):
     """Provider-neutral roles allowed in durable conversation context."""
 
     USER = "user"
     ASSISTANT = "assistant"
-
-
-class PromptExpertiseLevel(StrEnum):
-    """Allowlisted expertise descriptions owned by server configuration."""
-
-    SENIOR_ENGINEER = "senior_engineer"
-    PRODUCT_SPECIALIST = "product_specialist"
-
-
-class PromptCommunicationStyle(StrEnum):
-    """Allowlisted response styles owned by server configuration."""
-
-    DIRECT_HELPFUL = "direct_helpful"
-    CONCISE_SUPPORTIVE = "concise_supportive"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

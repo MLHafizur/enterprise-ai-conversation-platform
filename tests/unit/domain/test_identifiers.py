@@ -6,6 +6,7 @@ import pytest
 from enterprise_chat_platform.domain.errors import DomainValidationError
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
     EventId,
     MessageId,
@@ -39,6 +40,7 @@ def test_identifier_wrappers_remain_distinct_types() -> None:
         ConversationId(value),
         MessageId(value),
         AgentRunId(value),
+        AssistantProfileId(value),
         EventId(value),
     )
 

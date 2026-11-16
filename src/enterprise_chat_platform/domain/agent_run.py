@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfileRef
 from enterprise_chat_platform.domain.errors import (
     DomainValidationError,
     InvalidStateTransitionError,
@@ -69,6 +70,7 @@ class AgentRun:
     tenant_id: TenantId
     conversation_id: ConversationId
     input_message_id: MessageId
+    assistant_profile_ref: AssistantProfileRef
     created_at: datetime
     status: AgentRunStatus = AgentRunStatus.QUEUED
     started_at: datetime | None = None
@@ -77,6 +79,9 @@ class AgentRun:
     failure: AgentRunFailure | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.assistant_profile_ref, AssistantProfileRef):
+            raise DomainValidationError("Agent run assistant profile reference is invalid")
+
         created_at = normalize_utc(
             self.created_at,
             field_name="created_at",
