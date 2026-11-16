@@ -3,7 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import Sidebar from './Sidebar';
 
-const renderSidebar = (canViewGovernance, activeView = 'chat') =>
+const renderSidebar = ({
+  canViewGovernance = false,
+  canManageProfiles = false,
+  activeView = 'chat'
+} = {}) =>
   renderToStaticMarkup(
     <Sidebar
       conversations={[]}
@@ -13,9 +17,11 @@ const renderSidebar = (canViewGovernance, activeView = 'chat') =>
       creatingConversation={false}
       activeView={activeView}
       canViewGovernance={canViewGovernance}
+      canManageProfiles={canManageProfiles}
       onShowChat={() => {}}
       onShowCompliance={() => {}}
       onShowReviews={() => {}}
+      onShowProfiles={() => {}}
       user={{ name: 'Reviewer', tenant_id: 'tenant-a' }}
       onLogout={() => {}}
     />
@@ -23,22 +29,42 @@ const renderSidebar = (canViewGovernance, activeView = 'chat') =>
 
 describe('Sidebar governance navigation', () => {
   test('shows Compliance to an authorized reviewer', () => {
-    const markup = renderSidebar(true);
+    const view = renderSidebar({ canViewGovernance: true });
 
-    expect(markup).toContain('Compliance');
-    expect(markup).toContain('Review queue');
+    expect(view).toContain('Compliance');
+    expect(view).toContain('Review queue');
   });
 
   test('does not render Compliance for an ordinary user', () => {
-    const markup = renderSidebar(false);
+    const view = renderSidebar();
 
-    expect(markup).not.toContain('Compliance');
-    expect(markup).not.toContain('Review queue');
+    expect(view).not.toContain('Compliance');
+    expect(view).not.toContain('Review queue');
   });
 
   test('marks the review queue as the active workspace page', () => {
-    const markup = renderSidebar(true, 'reviews');
+    const view = renderSidebar({
+      canViewGovernance: true,
+      activeView: 'reviews'
+    });
 
-    expect(markup).toMatch(/aria-current="page"[^>]*>.*Review queue/s);
+    expect(view).toMatch(/aria-current="page"[^>]*>.*Review queue/s);
+  });
+
+  test('shows assistant profiles only to an administrator', () => {
+    const view = renderSidebar({ canManageProfiles: true });
+    const utils = renderSidebar({ canViewGovernance: true });
+
+    expect(view).toContain('Assistant profiles');
+    expect(utils).not.toContain('Assistant profiles');
+  });
+
+  test('marks assistant profiles as the active workspace page', () => {
+    const view = renderSidebar({
+      canManageProfiles: true,
+      activeView: 'profiles'
+    });
+
+    expect(view).toMatch(/aria-current="page"[^>]*>.*Assistant profiles/s);
   });
 });

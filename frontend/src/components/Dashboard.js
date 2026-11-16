@@ -3,6 +3,7 @@ import { matchPath, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'react-toastify';
 
 import { getApiErrorMessage } from '../api';
+import { canManageAssistantProfiles } from '../assistantProfiles';
 import {
   createClientUuid,
   createConversation,
@@ -12,6 +13,7 @@ import {
 import { useAuth } from '../hooks/useAuth';
 import { useWebSocket } from '../hooks/useWebSocket';
 import ChatInterface from './ChatInterface';
+import AssistantProfileManager from './AssistantProfileManager';
 import ComplianceDashboard from './ComplianceDashboard';
 import ConnectionStatus from './ConnectionStatus';
 import { canReadGovernance } from '../governance';
@@ -27,6 +29,7 @@ const Dashboard = () => {
   const dashboardPath = location.pathname.replace(/\/+$/, '') || '/';
   const isChatRoute = dashboardPath === '/dashboard';
   const isComplianceRoute = dashboardPath === '/dashboard/compliance';
+  const isProfilesRoute = dashboardPath === '/dashboard/profiles';
   const reviewDetailMatch = matchPath(
     '/dashboard/reviews/:agentRunId',
     dashboardPath
@@ -35,6 +38,7 @@ const Dashboard = () => {
     dashboardPath === '/dashboard/reviews' || reviewDetailMatch !== null;
   const selectedReviewId = reviewDetailMatch?.params.agentRunId || null;
   const canViewGovernance = canReadGovernance(user?.roles);
+  const canManageProfiles = canManageAssistantProfiles(user?.roles);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
@@ -125,7 +129,7 @@ const Dashboard = () => {
     await createNewConversation();
   }, [createNewConversation, navigate]);
 
-  if (!isChatRoute && !isComplianceRoute && !isReviewsRoute) {
+  if (!isChatRoute && !isComplianceRoute && !isReviewsRoute && !isProfilesRoute) {
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -133,16 +137,24 @@ const Dashboard = () => {
     return <Navigate to="/dashboard" replace />;
   }
 
-  const activeView = isComplianceRoute
-    ? 'compliance'
-    : isReviewsRoute
-      ? 'reviews'
-      : 'chat';
-  const pageTitle = isComplianceRoute
-    ? 'Governance Console'
-    : isReviewsRoute
-      ? 'Human Review'
-      : 'Enterprise Chat Agent';
+  if (isProfilesRoute && !canManageProfiles) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  const activeView = isProfilesRoute
+    ? 'profiles'
+    : isComplianceRoute
+      ? 'compliance'
+      : isReviewsRoute
+        ? 'reviews'
+        : 'chat';
+  const pageTitle = isProfilesRoute
+    ? 'Assistant Profiles'
+    : isComplianceRoute
+      ? 'Governance Console'
+      : isReviewsRoute
+        ? 'Human Review'
+        : 'Enterprise Chat Agent';
 
   return (
     <div className="flex h-screen min-w-[900px] bg-gray-100">
@@ -154,9 +166,11 @@ const Dashboard = () => {
         creatingConversation={creatingConversation}
         activeView={activeView}
         canViewGovernance={canViewGovernance}
+        canManageProfiles={canManageProfiles}
         onShowChat={() => navigate('/dashboard')}
         onShowCompliance={() => navigate('/dashboard/compliance')}
         onShowReviews={() => navigate('/dashboard/reviews')}
+        onShowProfiles={() => navigate('/dashboard/profiles')}
         user={user}
         onLogout={logout}
       />
@@ -180,7 +194,9 @@ const Dashboard = () => {
         </header>
 
         <main className="flex-1 overflow-hidden">
-          {isComplianceRoute ? (
+          {isProfilesRoute ? (
+            <AssistantProfileManager />
+          ) : isComplianceRoute ? (
             <ComplianceDashboard />
           ) : isReviewsRoute ? (
             <HumanReviewQueue

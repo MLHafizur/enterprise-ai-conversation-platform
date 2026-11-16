@@ -1,6 +1,7 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -15,6 +16,7 @@ from enterprise_chat_platform.infrastructure.persistence.models import (
     TenantAssistantProfileAssignmentRecord,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.assistant_profile import (
+    SqlAlchemyAssistantProfileAdminStore,
     SqlAlchemyAssistantProfileRepository,
 )
 
@@ -127,3 +129,58 @@ async def test_repository_requires_caller_owned_transaction() -> None:
             tenant_id=TENANT_ID,
             default_profile=profile,
         )
+
+
+@pytest.mark.asyncio
+async def test_admin_lock_is_exclusive_instead_of_share_locked() -> None:
+    session = _session()
+    profile = default_assistant_profile(tenant_id=TENANT_ID, created_at=CREATED_AT)
+    session.execute.side_effect = [
+        _result(_assignment()),
+        _result(assistant_profile_to_record(profile)),
+    ]
+    repository = SqlAlchemyAssistantProfileRepository(cast(AsyncSession, session))
+
+    await repository.get_or_create_active(
+        tenant_id=TENANT_ID,
+        default_profile=profile,
+        exclusive=True,
+    )
+
+    lock_statement = session.execute.await_args_list[0].args[0]
+    compiled = str(lock_statement.compile(dialect=POSTGRES_DIALECT))
+    assert "FOR UPDATE OF tenant_assistant_profile_assignments" in compiled
+    assert "FOR SHARE" not in compiled
+
+
+@pytest.mark.asyncio
+async def test_catalog_is_bounded_and_keeps_an_old_active_version_visible() -> None:
+    base = default_assistant_profile(tenant_id=TENANT_ID, created_at=CREATED_AT)
+    assignment = _assignment()
+    newest_records = tuple(
+        assistant_profile_to_record(
+            replace(
+                base,
+                ref=replace(base.ref, version=version),
+            )
+        )
+        for version in range(101, 1, -1)
+    )
+    active_record = assistant_profile_to_record(base)
+
+    session = MagicMock(spec=AsyncSession)
+    session.scalar = AsyncMock(side_effect=[assignment, active_record])
+    scalars_result = MagicMock()
+    scalars_result.all.return_value = newest_records
+    session.scalars = AsyncMock(return_value=scalars_result)
+
+    catalog = await SqlAlchemyAssistantProfileAdminStore._load_catalog(
+        session=cast(AsyncSession, session),
+        tenant_id=TENANT_ID,
+    )
+
+    assert catalog.latest_version == 101
+    assert len(catalog.versions) == 100
+    assert catalog.versions[0].ref.version == 101
+    assert catalog.versions[-1].ref.version == 1
+    assert catalog.active.profile_ref.version == 1

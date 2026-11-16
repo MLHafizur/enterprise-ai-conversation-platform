@@ -6,6 +6,7 @@ import {
   ClipboardDocumentCheckIcon,
   PlusIcon,
   ShieldCheckIcon,
+  SparklesIcon,
   UserCircleIcon
 } from '@heroicons/react/24/outline';
 import { format } from 'date-fns';
@@ -23,9 +24,11 @@ const Sidebar = ({
   creatingConversation,
   activeView,
   canViewGovernance,
+  canManageProfiles,
   onShowChat,
   onShowCompliance,
   onShowReviews,
+  onShowProfiles,
   user,
   onLogout
 }) => (
@@ -76,6 +79,21 @@ const Sidebar = ({
             Review queue
           </button>
         </>
+      )}
+      {canManageProfiles && (
+        <button
+          type="button"
+          onClick={onShowProfiles}
+          aria-current={activeView === 'profiles' ? 'page' : undefined}
+          className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+            activeView === 'profiles'
+              ? 'bg-indigo-50 text-indigo-700'
+              : 'text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <SparklesIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+          Assistant profiles
+        </button>
       )}
     </nav>
 
