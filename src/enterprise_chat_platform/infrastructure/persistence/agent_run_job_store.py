@@ -13,7 +13,11 @@ from enterprise_chat_platform.application.accept_user_turn import (
     AGENT_RUN_QUEUED_EVENT_TYPE,
 )
 from enterprise_chat_platform.application.errors import ConversationConcurrencyError
-from enterprise_chat_platform.application.process_agent_run import ClaimedAgentRun
+from enterprise_chat_platform.application.process_agent_run import (
+    INPUT_POLICY_BLOCKED_FAILURE,
+    INPUT_POLICY_ESCALATED_FAILURE,
+    ClaimedAgentRun,
+)
 from enterprise_chat_platform.application.realtime_events import (
     AGENT_RUN_TERMINAL_EVENT_TYPE,
     AGENT_RUN_TERMINAL_SCHEMA_VERSION,
@@ -26,6 +30,7 @@ from enterprise_chat_platform.domain.agent_run import (
     AgentRunStatus,
 )
 from enterprise_chat_platform.domain.chat import MessageRole
+from enterprise_chat_platform.domain.governance import PolicyAction, PolicyAssessment
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
     ConversationId,
@@ -55,6 +60,9 @@ from enterprise_chat_platform.infrastructure.persistence.models.outbox_event imp
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.conversation import (
     SqlAlchemyConversationRepository,
+)
+from enterprise_chat_platform.infrastructure.persistence.repositories.input_policy_assessment import (
+    SqlAlchemyInputPolicyAssessmentRepository,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.message import (
     SqlAlchemyMessageRepository,
@@ -223,6 +231,84 @@ class SqlAlchemyAgentRunJobStore:
                 await session.flush()
                 return True
 
+    async def apply_input_policy(
+        self,
+        *,
+        job: ClaimedAgentRun,
+        assessment: PolicyAssessment,
+        assessed_at: datetime,
+    ) -> PolicyAssessment | None:
+        """Persist the first decision and apply it while the lease is still owned.
+
+        An allow decision leaves the original queued event leased so the same
+        worker may call the provider. Blocking and escalation decisions finish
+        the run and publish that queued event in this same transaction.
+        """
+        assessment_time = normalize_utc(
+            assessed_at,
+            field_name="input_policy_application.assessed_at",
+        )
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                event_record = await _lock_owned_event(
+                    session=session,
+                    job=job,
+                    at=assessment_time,
+                )
+                if event_record is None:
+                    return None
+
+                run_record = await _select_run_for_update(
+                    session=session,
+                    job=job,
+                )
+                run = agent_run_from_record(run_record)
+                if run.status is not AgentRunStatus.RUNNING:
+                    raise RuntimeError("Only a running agent run can apply input policy")
+
+                repository = SqlAlchemyInputPolicyAssessmentRepository(session)
+                stored_assessment = await repository.insert_or_get(
+                    tenant_id=job.tenant_id,
+                    agent_run_id=job.agent_run_id,
+                    assessment=assessment,
+                    assessed_at=assessment_time,
+                )
+
+                if stored_assessment.action is PolicyAction.ALLOW:
+                    # Do not clear the lease or publish the queued event: the
+                    # caller still owns the provider-call phase of this job.
+                    return stored_assessment
+
+                failure = _INPUT_POLICY_FAILURES[stored_assessment.action]
+                effective_time = max(
+                    assessment_time,
+                    run.started_at or run.created_at,
+                )
+                failed_run = run.fail(
+                    failure=failure,
+                    at=effective_time,
+                )
+                _apply_run_snapshot(record=run_record, run=failed_run)
+                session.add(
+                    _terminal_notification_record(
+                        event=AgentRunTerminalEvent(
+                            id=EventId.new(),
+                            tenant_id=job.tenant_id,
+                            conversation_id=job.conversation_id,
+                            agent_run_id=job.agent_run_id,
+                            status=failed_run.status,
+                            output_message_id=None,
+                            conversation_version=event_record.aggregate_version,
+                            message_sequence=None,
+                            occurred_at=effective_time,
+                        ),
+                        aggregate_version=event_record.aggregate_version,
+                    )
+                )
+                _publish_event(event_record, at=effective_time)
+                return stored_assessment
+
     async def reschedule(
         self,
         *,
@@ -325,6 +411,11 @@ _TERMINAL_RUN_STATUSES = frozenset(
         AgentRunStatus.CANCELLED,
     }
 )
+
+_INPUT_POLICY_FAILURES = {
+    PolicyAction.BLOCK: INPUT_POLICY_BLOCKED_FAILURE,
+    PolicyAction.ESCALATE: INPUT_POLICY_ESCALATED_FAILURE,
+}
 
 
 def _pending_claim_statement(

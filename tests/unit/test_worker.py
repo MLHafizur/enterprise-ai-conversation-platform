@@ -44,6 +44,7 @@ async def test_worker_stops_and_disposes_engine() -> None:
     engine.dispose = AsyncMock()
     session_factory = MagicMock()
     process_worker = MagicMock()
+    input_policy = MagicMock()
 
     async def process_next() -> AgentRunWorkResult:
         stop_event.set()
@@ -63,10 +64,16 @@ async def test_worker_stops_and_disposes_engine() -> None:
         patch(
             "enterprise_chat_platform.worker.ProcessAgentRunWorker",
             return_value=process_worker,
-        ),
+        ) as worker_constructor,
+        patch(
+            "enterprise_chat_platform.worker.build_conversation_input_policy",
+            return_value=input_policy,
+        ) as build_input_policy,
     ):
         await run_worker(settings=settings, stop_event=stop_event)
 
+    build_input_policy.assert_called_once_with()
+    assert worker_constructor.call_args.kwargs["input_policy"] is input_policy
     engine.dispose.assert_awaited_once_with()
 
 

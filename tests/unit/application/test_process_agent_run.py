@@ -8,6 +8,8 @@ from uuid import UUID
 import pytest
 
 from enterprise_chat_platform.application.process_agent_run import (
+    INPUT_POLICY_BLOCKED_FAILURE,
+    INPUT_POLICY_ESCALATED_FAILURE,
     PROVIDER_INVALID_RESPONSE_FAILURE,
     PROVIDER_TERMINAL_FAILURE,
     PROVIDER_UNAVAILABLE_FAILURE,
@@ -23,6 +25,12 @@ from enterprise_chat_platform.application.process_agent_run import (
     _valid_completion_content,
 )
 from enterprise_chat_platform.domain.agent_run import AgentRunFailure
+from enterprise_chat_platform.domain.governance import (
+    PolicyAction,
+    PolicyAssessment,
+    PolicyFinding,
+    PolicySeverity,
+)
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
     ConversationId,
@@ -41,7 +49,37 @@ EVENT_ID = EventId.parse("66666666-6666-4666-8666-666666666666")
 SERVICE_AUTHOR_ID = UserId.parse("77777777-7777-4777-8777-777777777777")
 LEASE_TOKEN = UUID("88888888-8888-4888-8888-888888888888")
 STARTED_AT = datetime(2026, 11, 13, 17, 0, tzinfo=UTC)
+ASSESSED_AT = STARTED_AT + timedelta(milliseconds=500)
 FINISHED_AT = STARTED_AT + timedelta(seconds=1)
+ALLOW_ASSESSMENT = PolicyAssessment(
+    action=PolicyAction.ALLOW,
+    risk_score=0,
+    policy_version="conversation-input.v1",
+)
+BLOCK_ASSESSMENT = PolicyAssessment(
+    action=PolicyAction.BLOCK,
+    risk_score=0.99,
+    policy_version="conversation-input.v1",
+    findings=(
+        PolicyFinding(
+            code="security.blocked",
+            severity=PolicySeverity.CRITICAL,
+            safe_message="The request violates the input policy",
+        ),
+    ),
+)
+ESCALATE_ASSESSMENT = PolicyAssessment(
+    action=PolicyAction.ESCALATE,
+    risk_score=0.75,
+    policy_version="conversation-input.v1",
+    findings=(
+        PolicyFinding(
+            code="conversation.review",
+            severity=PolicySeverity.HIGH,
+            safe_message="The request requires human review",
+        ),
+    ),
+)
 
 
 def _job(*, attempt_count: int = 1) -> ClaimedAgentRun:
@@ -76,10 +114,15 @@ class FakeStore:
         *,
         job: ClaimedAgentRun | None,
         apply_result: bool = True,
+        policy_applied: bool = True,
+        authoritative_assessment: PolicyAssessment | None = None,
     ) -> None:
         self.job = job
         self.apply_result = apply_result
+        self.policy_applied = policy_applied
+        self.authoritative_assessment = authoritative_assessment
         self.claim_calls: list[tuple[datetime, timedelta]] = []
+        self.policy_applications: list[tuple[ClaimedAgentRun, PolicyAssessment, datetime]] = []
         self.completed: list[tuple[ClaimedAgentRun, MessageId, UserId, str, datetime]] = []
         self.rescheduled: list[tuple[ClaimedAgentRun, datetime, datetime]] = []
         self.failed: list[tuple[ClaimedAgentRun, AgentRunFailure, datetime]] = []
@@ -92,6 +135,18 @@ class FakeStore:
     ) -> ClaimedAgentRun | None:
         self.claim_calls.append((now, lease_duration))
         return self.job
+
+    async def apply_input_policy(
+        self,
+        *,
+        job: ClaimedAgentRun,
+        assessment: PolicyAssessment,
+        assessed_at: datetime,
+    ) -> PolicyAssessment | None:
+        self.policy_applications.append((job, assessment, assessed_at))
+        if not self.policy_applied:
+            return None
+        return self.authoritative_assessment or assessment
 
     async def complete(
         self,
@@ -136,6 +191,20 @@ class StaticProvider:
         return self.completion
 
 
+class StaticInputPolicy:
+    def __init__(self, assessment: PolicyAssessment = ALLOW_ASSESSMENT) -> None:
+        self.assessment = assessment
+        self.contents: list[str] = []
+
+    @property
+    def policy_version(self) -> str:
+        return self.assessment.policy_version
+
+    def evaluate(self, *, content: str) -> PolicyAssessment:
+        self.contents.append(content)
+        return self.assessment
+
+
 class ErrorProvider:
     def __init__(self, error: Exception) -> None:
         self.error = error
@@ -172,12 +241,14 @@ def _worker(
     store: FakeStore,
     provider: StaticProvider | ErrorProvider | SlowProvider,
     clock: FakeClock,
+    input_policy: StaticInputPolicy | None = None,
     config: AgentRunWorkerConfig | None = None,
     random_value: float = 0.5,
 ) -> ProcessAgentRunWorker:
     return ProcessAgentRunWorker(
         store=store,
         provider=provider,
+        input_policy=input_policy or StaticInputPolicy(),
         clock=clock,
         ids=FixedIds(),
         service_author_id=SERVICE_AUTHOR_ID,
@@ -193,7 +264,7 @@ async def test_success_calls_provider_between_claim_and_atomic_completion() -> N
     worker = _worker(
         store=store,
         provider=provider,
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
     )
 
     result = await worker.process_next()
@@ -219,6 +290,7 @@ async def test_success_calls_provider_between_claim_and_atomic_completion() -> N
     ]
     assert store.rescheduled == []
     assert store.failed == []
+    assert store.policy_applications == [(_job(), ALLOW_ASSESSMENT, ASSESSED_AT)]
 
 
 @pytest.mark.asyncio
@@ -238,6 +310,104 @@ async def test_no_due_job_does_not_call_provider() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("assessment", "expected_result", "expected_failure"),
+    [
+        (
+            BLOCK_ASSESSMENT,
+            AgentRunWorkResult.POLICY_BLOCKED,
+            INPUT_POLICY_BLOCKED_FAILURE,
+        ),
+        (
+            ESCALATE_ASSESSMENT,
+            AgentRunWorkResult.POLICY_ESCALATED,
+            INPUT_POLICY_ESCALATED_FAILURE,
+        ),
+    ],
+)
+async def test_non_allow_policy_never_calls_provider(
+    assessment: PolicyAssessment,
+    expected_result: AgentRunWorkResult,
+    expected_failure: AgentRunFailure,
+) -> None:
+    job = _job(attempt_count=99)
+    store = FakeStore(job=job)
+    provider = StaticProvider(ChatCompletion(content="must not be used"))
+    input_policy = StaticInputPolicy(assessment)
+    worker = _worker(
+        store=store,
+        provider=provider,
+        input_policy=input_policy,
+        clock=FakeClock(STARTED_AT, ASSESSED_AT),
+        config=_config(max_attempts=1),
+    )
+
+    assert await worker.process_next() is expected_result
+    assert input_policy.contents == [job.input_content]
+    assert store.policy_applications == [(job, assessment, ASSESSED_AT)]
+    assert provider.requests == []
+    assert store.failed == []
+    assert expected_failure.code in {"input_policy_blocked", "input_policy_escalated"}
+    assert expected_failure.safe_message.isprintable()
+
+
+@pytest.mark.asyncio
+async def test_durable_policy_decision_wins_over_fresh_candidate() -> None:
+    job = _job()
+    store = FakeStore(
+        job=job,
+        authoritative_assessment=BLOCK_ASSESSMENT,
+    )
+    provider = StaticProvider(ChatCompletion(content="must not be used"))
+    worker = _worker(
+        store=store,
+        provider=provider,
+        input_policy=StaticInputPolicy(ALLOW_ASSESSMENT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT),
+    )
+
+    assert await worker.process_next() is AgentRunWorkResult.POLICY_BLOCKED
+    assert store.policy_applications == [(job, ALLOW_ASSESSMENT, ASSESSED_AT)]
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_durable_allow_is_not_replaced_by_fresh_block() -> None:
+    job = _job()
+    store = FakeStore(
+        job=job,
+        authoritative_assessment=ALLOW_ASSESSMENT,
+    )
+    provider = StaticProvider(ChatCompletion(content="Previously authorized response"))
+    worker = _worker(
+        store=store,
+        provider=provider,
+        input_policy=StaticInputPolicy(BLOCK_ASSESSMENT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
+    )
+
+    assert await worker.process_next() is AgentRunWorkResult.SUCCEEDED
+    assert store.policy_applications == [(job, BLOCK_ASSESSMENT, ASSESSED_AT)]
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_lost_lease_while_applying_policy_stops_before_provider() -> None:
+    store = FakeStore(job=_job(), policy_applied=False)
+    provider = StaticProvider(ChatCompletion(content="must not be used"))
+    worker = _worker(
+        store=store,
+        provider=provider,
+        clock=FakeClock(STARTED_AT, ASSESSED_AT),
+    )
+
+    assert await worker.process_next() is AgentRunWorkResult.LEASE_LOST
+    assert provider.requests == []
+    assert store.completed == []
+    assert store.failed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "error",
     [
         TransientChatProviderError("secret upstream details"),
@@ -251,7 +421,7 @@ async def test_transient_or_unknown_error_reschedules_without_storing_raw_error(
     worker = _worker(
         store=store,
         provider=ErrorProvider(error),
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
         random_value=0.5,
     )
 
@@ -274,7 +444,7 @@ async def test_provider_timeout_is_transient_and_releases_for_retry() -> None:
     worker = _worker(
         store=store,
         provider=SlowProvider(),
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
         config=_config(provider_timeout=timedelta(milliseconds=1)),
     )
 
@@ -289,7 +459,7 @@ async def test_last_transient_attempt_fails_with_constant_safe_message() -> None
     worker = _worker(
         store=store,
         provider=ErrorProvider(TransientChatProviderError("raw API key=secret")),
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
         config=_config(max_attempts=3),
     )
 
@@ -306,7 +476,7 @@ async def test_reclaimed_job_over_attempt_limit_never_calls_provider() -> None:
     worker = _worker(
         store=store,
         provider=provider,
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
         config=_config(max_attempts=3),
     )
 
@@ -323,7 +493,7 @@ async def test_terminal_provider_error_fails_without_retry() -> None:
     worker = _worker(
         store=store,
         provider=ErrorProvider(TerminalChatProviderError("raw request details")),
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
     )
 
     assert await worker.process_next() is AgentRunWorkResult.FAILED
@@ -338,7 +508,7 @@ async def test_invalid_provider_content_is_terminal(content: str) -> None:
     worker = _worker(
         store=store,
         provider=StaticProvider(ChatCompletion(content=content)),
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
     )
 
     assert await worker.process_next() is AgentRunWorkResult.FAILED
@@ -356,7 +526,7 @@ async def test_lost_lease_prevents_late_completion_from_reporting_success() -> N
     worker = _worker(
         store=store,
         provider=StaticProvider(ChatCompletion(content="late response")),
-        clock=FakeClock(STARTED_AT, FINISHED_AT),
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
     )
 
     assert await worker.process_next() is AgentRunWorkResult.LEASE_LOST

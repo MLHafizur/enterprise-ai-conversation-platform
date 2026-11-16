@@ -15,6 +15,9 @@ from enterprise_chat_platform.application.process_agent_run import (
     ChatProvider,
     ProcessAgentRunWorker,
 )
+from enterprise_chat_platform.domain.conversation_policy import (
+    build_conversation_input_policy,
+)
 from enterprise_chat_platform.domain.identifiers import MessageId, UserId
 from enterprise_chat_platform.infrastructure.chat_provider import EchoChatProvider
 from enterprise_chat_platform.infrastructure.gemini_provider import GeminiChatProvider
@@ -104,6 +107,7 @@ async def run_worker(
     worker = ProcessAgentRunWorker(
         store=SqlAlchemyAgentRunJobStore(session_factory),
         provider=_chat_provider(resolved_settings, http_client=http_client),
+        input_policy=build_conversation_input_policy(),
         clock=UtcSystemClock(),
         ids=UuidWorkerIds(),
         service_author_id=UserId(resolved_settings.worker_service_author_id),
