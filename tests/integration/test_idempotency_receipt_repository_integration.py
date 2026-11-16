@@ -16,6 +16,7 @@ from enterprise_chat_platform.application.accept_user_turn import (
     IdempotencyReceipt,
     IdempotencyScope,
 )
+from enterprise_chat_platform.application.tenant_catalog import default_assistant_profile
 from enterprise_chat_platform.domain.chat import (
     AcceptedUserTurn,
     Conversation,
@@ -36,6 +37,9 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 from enterprise_chat_platform.infrastructure.persistence.mappers.agent_run import (
     agent_run_to_new_record,
 )
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_to_record,
+)
 from enterprise_chat_platform.infrastructure.persistence.mappers.conversation import (
     conversation_to_new_record,
 )
@@ -44,6 +48,7 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.message import 
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     IdempotencyReceiptRecord,
+    TenantAssistantProfileAssignmentRecord,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.idempotency_receipt import (
     SqlAlchemyIdempotencyReceiptRepository,
@@ -124,11 +129,16 @@ def _build_receipt() -> tuple[
         created_by=actor_id,
         at=ACCEPTED_AT,
     )
+    profile = default_assistant_profile(
+        tenant_id=tenant_id,
+        created_at=ACCEPTED_AT,
+    )
     accepted_turn = conversation.accept_user_turn(
         trusted_tenant_id=tenant_id,
         actor_id=actor_id,
         message_id=MessageId.new(),
         agent_run_id=AgentRunId.new(),
+        assistant_profile_ref=profile.ref,
         content="Explain transactional idempotency.",
         idempotency_key=key,
         at=ACCEPTED_AT,
@@ -159,6 +169,22 @@ async def _stage_parent_graph(
     session: AsyncSession,
     accepted_turn: AcceptedUserTurn,
 ) -> None:
+    profile = default_assistant_profile(
+        tenant_id=accepted_turn.updated_conversation.tenant_id,
+        created_at=accepted_turn.message.created_at,
+    )
+    session.add(assistant_profile_to_record(profile))
+    session.add(
+        TenantAssistantProfileAssignmentRecord(
+            tenant_id=profile.tenant_id.value,
+            profile_id=profile.ref.id.value,
+            profile_version=profile.ref.version,
+            revision=0,
+            activated_at=profile.created_at,
+            activated_by=profile.created_by.value,
+        )
+    )
+    await session.flush()
     session.add(conversation_to_new_record(accepted_turn.updated_conversation))
     await session.flush()
 

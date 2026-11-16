@@ -13,6 +13,7 @@ def test_relay_config_uses_validated_settings() -> None:
         realtime_relay_lease_seconds=45,
         realtime_relay_initial_backoff_seconds=2,
         realtime_relay_max_backoff_seconds=20,
+        _env_file=None,
     )
 
     config = _relay_config(settings)
@@ -24,7 +25,10 @@ def test_relay_config_uses_validated_settings() -> None:
 
 @pytest.mark.asyncio
 async def test_relay_fails_closed_when_realtime_is_disabled() -> None:
-    settings = Settings(database_url=SecretStr(DATABASE_URL))
+    settings = Settings(
+        database_url=SecretStr(DATABASE_URL),
+        _env_file=None,
+    )
 
     with pytest.raises(RuntimeError, match="Realtime must be enabled"):
         await run_relay(settings=settings)

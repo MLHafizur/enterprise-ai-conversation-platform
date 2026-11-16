@@ -21,6 +21,8 @@ from enterprise_chat_platform.application.errors import (
     ConversationNotFoundError,
     IdempotencyConflictError,
 )
+from enterprise_chat_platform.application.tenant_catalog import default_assistant_profile
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfile
 from enterprise_chat_platform.domain.chat import (
     AcceptedUserTurn,
     Conversation,
@@ -104,13 +106,19 @@ class FakeAcceptUserTurnUnitOfWork:
         self,
         conversation: Conversation,
         *,
+        assistant_profile: AssistantProfile | None = None,
         commit_error: Exception | None = None,
     ) -> None:
         self.conversation = conversation
         self.receipt: IdempotencyReceipt | None = None
+        self.assistant_profile = assistant_profile or default_assistant_profile(
+            tenant_id=conversation.tenant_id,
+            created_at=ACCEPTED_AT,
+        )
         self.commit_error = commit_error
 
         self.loaded_scope: IdempotencyScope | None = None
+        self.profile_calls: list[tuple[TenantId, AssistantProfile]] = []
         self.staged_expected_version: int | None = None
         self.staged_turn: AcceptedUserTurn | None = None
         self.staged_receipt: IdempotencyReceipt | None = None
@@ -153,6 +161,15 @@ class FakeAcceptUserTurnUnitOfWork:
     ) -> IdempotencyReceipt | None:
         self.loaded_scope = scope
         return self.receipt
+
+    async def get_or_create_active_assistant_profile(
+        self,
+        *,
+        tenant_id: TenantId,
+        default_profile: AssistantProfile,
+    ) -> AssistantProfile:
+        self.profile_calls.append((tenant_id, default_profile))
+        return self.assistant_profile
 
     def stage_accepted_turn(
         self,
@@ -301,6 +318,19 @@ async def test_accept_user_turn_stages_atomic_write_and_commits_once() -> None:
     assert unit_of_work.staged_turn.message.content == command.content
     assert unit_of_work.staged_turn.updated_conversation.version == 1
     assert unit_of_work.staged_turn.agent_run.id == AGENT_RUN_ID
+    assert unit_of_work.staged_turn.agent_run.assistant_profile_ref == (
+        unit_of_work.assistant_profile.ref
+    )
+    assert unit_of_work.profile_calls == [
+        (
+            TENANT_ID,
+            default_assistant_profile(
+                tenant_id=TENANT_ID,
+                created_at=ACCEPTED_AT,
+            ),
+        )
+    ]
+    assert unit_of_work.profile_calls[0][1].created_by != ACTOR_ID
 
     assert unit_of_work.staged_event is not None
     assert unit_of_work.staged_event.id == EVENT_ID
@@ -369,6 +399,7 @@ async def test_exact_replay_returns_original_result_without_side_effects() -> No
     assert ids.agent_run_calls == 1
     assert ids.event_calls == 1
     assert len(authorizer.calls) == 2
+    assert len(unit_of_work.profile_calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -436,6 +467,7 @@ async def test_reused_key_with_different_request_is_rejected(
     assert ids.agent_run_calls == 1
     assert ids.event_calls == 1
     assert len(authorizer.calls) == 2
+    assert len(unit_of_work.profile_calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -480,6 +512,7 @@ async def test_unavailable_conversation_is_reported_without_side_effects(
     assert ids.message_calls == 0
     assert ids.agent_run_calls == 0
     assert ids.event_calls == 0
+    assert unit_of_work.profile_calls == []
 
 
 @pytest.mark.asyncio
@@ -516,6 +549,7 @@ async def test_unauthorized_actor_receives_not_found_without_side_effects() -> N
     assert ids.message_calls == 0
     assert ids.agent_run_calls == 0
     assert ids.event_calls == 0
+    assert unit_of_work.profile_calls == []
 
 
 @pytest.mark.asyncio

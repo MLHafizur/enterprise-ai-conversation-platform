@@ -15,3 +15,19 @@ class IdempotencyConflictError(ApplicationError):
 
 class ConversationConcurrencyError(ApplicationError):
     """Raised when another writer changes a conversation first."""
+
+
+class HumanReviewNotFoundError(ApplicationError):
+    """Raised when a review case is missing from the actor's tenant."""
+
+
+class HumanReviewConflictError(ApplicationError):
+    """Raised when a review case changed before a requested transition."""
+
+
+class AssistantProfileNotFoundError(ApplicationError):
+    """Raised when a tenant-scoped assistant profile cannot be resolved."""
+
+
+class AssistantProfileConflictError(ApplicationError):
+    """Raised when assistant profile state changed before an admin write."""

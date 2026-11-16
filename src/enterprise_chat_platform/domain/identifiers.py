@@ -67,6 +67,12 @@ class AgentRunId(_UUIDIdentifier):
     __slots__ = ()
 
 
+class AssistantProfileId(_UUIDIdentifier):
+    """Uniquely identifies one tenant-scoped assistant profile."""
+
+    __slots__ = ()
+
+
 class EventId(_UUIDIdentifier):
     """Uniquely identifiers an application or integration event."""
 

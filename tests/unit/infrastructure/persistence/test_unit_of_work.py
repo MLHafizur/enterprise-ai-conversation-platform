@@ -15,6 +15,7 @@ from enterprise_chat_platform.application.accept_user_turn import (
     IdempotencyScope,
 )
 from enterprise_chat_platform.application.errors import ConversationConcurrencyError
+from enterprise_chat_platform.application.tenant_catalog import default_assistant_profile
 from enterprise_chat_platform.domain.chat import AcceptedUserTurn, Conversation
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
@@ -31,6 +32,9 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.agent_run import (
     SqlAlchemyAgentRunRepository,
+)
+from enterprise_chat_platform.infrastructure.persistence.repositories.assistant_profile import (
+    SqlAlchemyAssistantProfileRepository,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.conversation import (
     SqlAlchemyConversationRepository,
@@ -76,6 +80,7 @@ class _Repositories:
     receipt: MagicMock
     message: MagicMock
     agent_run: MagicMock
+    assistant_profile: MagicMock
     outbox: MagicMock
 
 
@@ -101,6 +106,10 @@ def _turn_bundle() -> _TurnBundle:
         actor_id=ACTOR_ID,
         message_id=MESSAGE_ID,
         agent_run_id=AGENT_RUN_ID,
+        assistant_profile_ref=default_assistant_profile(
+            tenant_id=TENANT_ID,
+            created_at=ACCEPTED_AT,
+        ).ref,
         content="Explain transaction boundaries.",
         idempotency_key=IdempotencyKey("turn-uow-test"),
         at=ACCEPTED_AT,
@@ -153,6 +162,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
         receipt=MagicMock(spec=SqlAlchemyIdempotencyReceiptRepository),
         message=MagicMock(spec=SqlAlchemyMessageRepository),
         agent_run=MagicMock(spec=SqlAlchemyAgentRunRepository),
+        assistant_profile=MagicMock(spec=SqlAlchemyAssistantProfileRepository),
         outbox=MagicMock(spec=SqlAlchemyOutboxEventRepository),
     )
     repositories.conversation.update_if_version_matches.return_value = True
@@ -161,6 +171,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     receipt_factory = MagicMock(return_value=repositories.receipt)
     message_factory = MagicMock(return_value=repositories.message)
     agent_run_factory = MagicMock(return_value=repositories.agent_run)
+    assistant_profile_factory = MagicMock(return_value=repositories.assistant_profile)
     outbox_factory = MagicMock(return_value=repositories.outbox)
 
     monkeypatch.setattr(
@@ -185,6 +196,11 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     )
     monkeypatch.setattr(
         uow_module,
+        "SqlAlchemyAssistantProfileRepository",
+        assistant_profile_factory,
+    )
+    monkeypatch.setattr(
+        uow_module,
         "SqlAlchemyOutboxEventRepository",
         outbox_factory,
     )
@@ -201,6 +217,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
             receipt_factory,
             message_factory,
             agent_run_factory,
+            assistant_profile_factory,
             outbox_factory,
         ),
     )
@@ -263,6 +280,29 @@ async def test_receipt_lookup_acquires_scope_lock_before_read(
         call.lock(scope=bundle.receipt.scope),
         call.get(scope=bundle.receipt.scope),
     ]
+
+
+@pytest.mark.asyncio
+async def test_active_assistant_profile_lookup_delegates_in_owned_transaction(
+    harness: _Harness,
+) -> None:
+    profile = default_assistant_profile(
+        tenant_id=TENANT_ID,
+        created_at=ACCEPTED_AT,
+    )
+    harness.repositories.assistant_profile.get_or_create_active.return_value = profile
+
+    async with harness.unit_of_work:
+        loaded = await harness.unit_of_work.get_or_create_active_assistant_profile(
+            tenant_id=TENANT_ID,
+            default_profile=profile,
+        )
+
+    assert loaded is profile
+    harness.repositories.assistant_profile.get_or_create_active.assert_awaited_once_with(
+        tenant_id=TENANT_ID,
+        default_profile=profile,
+    )
 
 
 @pytest.mark.asyncio
@@ -466,6 +506,14 @@ async def test_operations_are_rejected_outside_context(harness: _Harness) -> Non
         )
     with pytest.raises(RuntimeError, match="active transaction"):
         await harness.unit_of_work.get_idempotency_receipt(scope=bundle.receipt.scope)
+    with pytest.raises(RuntimeError, match="active transaction"):
+        await harness.unit_of_work.get_or_create_active_assistant_profile(
+            tenant_id=TENANT_ID,
+            default_profile=default_assistant_profile(
+                tenant_id=TENANT_ID,
+                created_at=ACCEPTED_AT,
+            ),
+        )
     with pytest.raises(RuntimeError, match="active transaction"):
         harness.unit_of_work.stage_accepted_turn(
             expected_conversation_version=bundle.expected_version,

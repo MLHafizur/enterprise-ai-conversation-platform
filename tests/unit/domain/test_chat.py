@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from enterprise_chat_platform.domain.agent_run import AgentRunStatus
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfileRef
 from enterprise_chat_platform.domain.chat import (
     MAX_USER_MESSAGE_LENGTH,
     AcceptedUserTurn,
@@ -18,6 +19,7 @@ from enterprise_chat_platform.domain.errors import (
 )
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
     MessageId,
     TenantId,
@@ -33,6 +35,10 @@ FIRST_MESSAGE_ID = MessageId.parse("55555555-5555-4555-8555-555555555555")
 FIRST_RUN_ID = AgentRunId.parse("66666666-6666-4666-8666-666666666666")
 SECOND_MESSAGE_ID = MessageId.parse("77777777-7777-4777-8777-777777777777")
 SECOND_RUN_ID = AgentRunId.parse("88888888-8888-4888-8888-888888888888")
+PROFILE_REF = AssistantProfileRef(
+    id=AssistantProfileId.parse("99999999-9999-4999-8999-999999999998"),
+    version=7,
+)
 
 CREATED_AT = datetime(2026, 11, 6, 15, 0, tzinfo=UTC)
 FIRST_ACCEPTED_AT = CREATED_AT + timedelta(seconds=1)
@@ -60,6 +66,7 @@ def _accept_first_turn(
         actor_id=USER_ID,
         message_id=FIRST_MESSAGE_ID,
         agent_run_id=FIRST_RUN_ID,
+        assistant_profile_ref=PROFILE_REF,
         content=content,
         idempotency_key=IdempotencyKey("request-001"),
         at=at,
@@ -110,6 +117,7 @@ def test_accept_user_turn_creates_message_and_queued_run() -> None:
     assert run.tenant_id == TENANT_ID
     assert run.conversation_id == CONVERSATION_ID
     assert run.input_message_id == FIRST_MESSAGE_ID
+    assert run.assistant_profile_ref == PROFILE_REF
     assert run.status is AgentRunStatus.QUEUED
     assert run.created_at == FIRST_ACCEPTED_AT
 
@@ -122,6 +130,7 @@ def test_second_turn_increments_version_and_sequence() -> None:
         actor_id=USER_ID,
         message_id=SECOND_MESSAGE_ID,
         agent_run_id=SECOND_RUN_ID,
+        assistant_profile_ref=PROFILE_REF,
         content="Second message",
         idempotency_key=IdempotencyKey("request-002"),
         at=SECOND_ACCEPTED_AT,

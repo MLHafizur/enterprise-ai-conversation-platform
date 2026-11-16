@@ -10,7 +10,11 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from enterprise_chat_platform.api.dependencies import get_runtime_settings
-from enterprise_chat_platform.api.security import get_actor_context
+from enterprise_chat_platform.api.security import (
+    AuthenticatedPrincipal,
+    get_actor_context,
+    get_authenticated_principal,
+)
 from enterprise_chat_platform.application.accept_user_turn import ActorContext
 from enterprise_chat_platform.settings import Settings
 
@@ -53,6 +57,19 @@ def _application(settings: Settings) -> FastAPI:
         return {
             "tenant_id": str(actor.tenant_id),
             "actor_id": str(actor.actor_id),
+        }
+
+    @application.get("/principal")
+    async def principal_details(
+        principal: Annotated[
+            AuthenticatedPrincipal,
+            Depends(get_authenticated_principal),
+        ],
+    ) -> dict[str, object]:
+        return {
+            "tenant_id": str(principal.actor.tenant_id),
+            "actor_id": str(principal.actor.actor_id),
+            "roles": sorted(principal.roles),
         }
 
     return application
@@ -114,6 +131,26 @@ def test_development_headers_create_trusted_actor_context() -> None:
     assert response.json() == {
         "tenant_id": TENANT_ID,
         "actor_id": USER_ID,
+    }
+
+
+def test_development_principal_has_no_authorization_roles() -> None:
+    application = _application(_settings(auth_mode="development"))
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/principal",
+            headers={
+                "X-Dev-Tenant-Id": TENANT_ID,
+                "X-Dev-User-Id": USER_ID,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tenant_id": TENANT_ID,
+        "actor_id": USER_ID,
+        "roles": [],
     }
 
 
@@ -185,6 +222,23 @@ def test_valid_jwt_creates_trusted_actor_context() -> None:
     assert response.json() == {
         "tenant_id": TENANT_ID,
         "actor_id": USER_ID,
+    }
+
+
+def test_valid_jwt_principal_preserves_signed_roles() -> None:
+    application = _application(_settings(auth_mode="jwt"))
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/principal",
+            headers={"Authorization": f"Bearer {_jwt_token(roles=['agent', 'admin'])}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tenant_id": TENANT_ID,
+        "actor_id": USER_ID,
+        "roles": ["admin", "agent"],
     }
 
 

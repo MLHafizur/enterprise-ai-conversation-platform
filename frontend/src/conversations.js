@@ -1,4 +1,8 @@
 import api from './api';
+import {
+  attachInputPolicyNotices,
+  fetchInputPolicyNotices
+} from './policyNotices';
 
 const fallbackUuid = () => {
   const bytes = new Uint8Array(16);
@@ -148,13 +152,14 @@ export const fetchAllMessages = async (conversationId) => {
 
 export const fetchConversationSnapshot = async (conversationId) => {
   const encodedId = encodeURIComponent(conversationId);
-  const [conversationResponse, messages] = await Promise.all([
+  const [conversationResponse, messages, notices] = await Promise.all([
     api.get(`/v1/conversations/${encodedId}`),
-    fetchAllMessages(conversationId)
+    fetchAllMessages(conversationId),
+    fetchInputPolicyNotices(conversationId)
   ]);
 
   return {
     conversation: conversationResponse.data,
-    messages
+    messages: attachInputPolicyNotices(messages, notices)
   };
 };

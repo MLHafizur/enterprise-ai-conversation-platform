@@ -7,10 +7,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from enterprise_chat_platform.application.accept_user_turn import (
     AcceptUserTurnCommand,
@@ -25,6 +26,9 @@ from enterprise_chat_platform.application.errors import (
     ConversationConcurrencyError,
     ConversationNotFoundError,
     IdempotencyConflictError,
+)
+from enterprise_chat_platform.application.tenant_catalog import (
+    default_assistant_profile,
 )
 from enterprise_chat_platform.domain.chat import Conversation
 from enterprise_chat_platform.domain.identifiers import (
@@ -41,15 +45,20 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
+from enterprise_chat_platform.infrastructure.persistence.mappers.assistant_profile import (
+    assistant_profile_to_record,
+)
 from enterprise_chat_platform.infrastructure.persistence.mappers.conversation import (
     conversation_to_new_record,
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     IdempotencyReceiptRecord,
     MessageRecord,
     OutboxEventRecord,
+    TenantAssistantProfileAssignmentRecord,
 )
 from enterprise_chat_platform.infrastructure.persistence.models.outbox_event import (
     OUTBOX_AGGREGATE_TYPE,
@@ -61,7 +70,7 @@ from enterprise_chat_platform.infrastructure.runtime_adapters import (
     OwnerOnlyConversationWriteAuthorizer,
     UuidTurnIds,
 )
-from enterprise_chat_platform.settings import Settings
+from enterprise_chat_platform.settings import MigrationSettings, Settings
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 CREATED_AT = datetime(2026, 11, 13, 14, 0, tzinfo=UTC)
@@ -140,6 +149,32 @@ def _create_local_database_resources() -> tuple[AsyncEngine, AsyncSessionFactory
     return engine, create_session_factory(engine)
 
 
+def _create_local_migration_engine() -> AsyncEngine:
+    runtime_settings = Settings()
+    migration_settings = MigrationSettings()
+    runtime_url = make_url(runtime_settings.database_url.get_secret_value())
+    migration_url = make_url(migration_settings.migration_database_url.get_secret_value())
+
+    assert runtime_settings.environment in {"local", "test"}
+    assert runtime_url.host in LOOPBACK_HOSTS
+    assert migration_url.host in LOOPBACK_HOSTS
+    assert (
+        migration_url.host,
+        migration_url.port,
+        migration_url.database,
+    ) == (
+        runtime_url.host,
+        runtime_url.port,
+        runtime_url.database,
+    )
+
+    return create_async_engine(
+        migration_url,
+        poolclass=NullPool,
+        hide_parameters=True,
+    )
+
+
 @asynccontextmanager
 async def _database_case(
     *,
@@ -190,40 +225,54 @@ async def _database_case(
             ),
         )
     finally:
+        cleanup_engine = _create_local_migration_engine()
         try:
-            async with session_factory() as cleanup_session, cleanup_session.begin():
-                await cleanup_session.execute(
+            async with cleanup_engine.begin() as cleanup_connection:
+                await cleanup_connection.execute(
                     delete(OutboxEventRecord).where(
                         OutboxEventRecord.tenant_id == tenant_id.value,
                         OutboxEventRecord.aggregate_id == conversation.id.value,
                     )
                 )
-                await cleanup_session.execute(
+                await cleanup_connection.execute(
                     delete(IdempotencyReceiptRecord).where(
                         IdempotencyReceiptRecord.tenant_id == tenant_id.value,
                         IdempotencyReceiptRecord.conversation_id == conversation.id.value,
                     )
                 )
-                await cleanup_session.execute(
+                await cleanup_connection.execute(
                     delete(AgentRunRecord).where(
                         AgentRunRecord.tenant_id == tenant_id.value,
                         AgentRunRecord.conversation_id == conversation.id.value,
                     )
                 )
-                await cleanup_session.execute(
+                await cleanup_connection.execute(
                     delete(MessageRecord).where(
                         MessageRecord.tenant_id == tenant_id.value,
                         MessageRecord.conversation_id == conversation.id.value,
                     )
                 )
-                await cleanup_session.execute(
+                await cleanup_connection.execute(
                     delete(ConversationRecord).where(
                         ConversationRecord.tenant_id == tenant_id.value,
                         ConversationRecord.id == conversation.id.value,
                     )
                 )
+                await cleanup_connection.execute(
+                    delete(TenantAssistantProfileAssignmentRecord).where(
+                        TenantAssistantProfileAssignmentRecord.tenant_id == tenant_id.value,
+                    )
+                )
+                await cleanup_connection.execute(
+                    delete(AssistantProfileVersionRecord).where(
+                        AssistantProfileVersionRecord.tenant_id == tenant_id.value,
+                    )
+                )
         finally:
-            await engine.dispose()
+            try:
+                await cleanup_engine.dispose()
+            finally:
+                await engine.dispose()
 
 
 def _handler(
@@ -321,6 +370,67 @@ async def _load_graph(case: _DatabaseCase) -> _StoredGraph:
         receipts=receipts,
         outbox_events=outbox_events,
     )
+
+
+async def _load_profile_state(
+    case: _DatabaseCase,
+) -> tuple[
+    tuple[AssistantProfileVersionRecord, ...],
+    TenantAssistantProfileAssignmentRecord | None,
+]:
+    tenant_id = case.conversation.tenant_id.value
+
+    async with case.session_factory() as session:
+        profiles = tuple(
+            (
+                await session.scalars(
+                    select(AssistantProfileVersionRecord)
+                    .where(AssistantProfileVersionRecord.tenant_id == tenant_id)
+                    .order_by(
+                        AssistantProfileVersionRecord.profile_id,
+                        AssistantProfileVersionRecord.version,
+                    )
+                )
+            ).all()
+        )
+        assignment = await session.scalar(
+            select(TenantAssistantProfileAssignmentRecord).where(
+                TenantAssistantProfileAssignmentRecord.tenant_id == tenant_id,
+            )
+        )
+
+    return profiles, assignment
+
+
+async def _activate_profile_v2(case: _DatabaseCase) -> None:
+    profile_v1 = default_assistant_profile(
+        tenant_id=case.conversation.tenant_id,
+        created_at=ACCEPTED_AT,
+    )
+    profile_v2 = replace(
+        profile_v1,
+        ref=replace(profile_v1.ref, version=2),
+        assistant_name="Enterprise Assistant V2",
+    )
+
+    async with case.session_factory() as session, session.begin():
+        session.add(assistant_profile_to_record(profile_v2))
+        await session.flush()
+        await session.execute(
+            update(TenantAssistantProfileAssignmentRecord)
+            .where(
+                TenantAssistantProfileAssignmentRecord.tenant_id
+                == case.conversation.tenant_id.value,
+                TenantAssistantProfileAssignmentRecord.profile_id == profile_v1.ref.id.value,
+                TenantAssistantProfileAssignmentRecord.profile_version == 1,
+            )
+            .values(
+                profile_version=2,
+                revision=TenantAssistantProfileAssignmentRecord.revision + 1,
+                activated_at=ACCEPTED_AT,
+                activated_by=profile_v2.created_by.value,
+            )
+        )
 
 
 def _assert_single_turn_graph(
@@ -481,6 +591,54 @@ async def test_exact_replay_returns_original_result_without_extra_side_effects()
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_exact_replay_keeps_original_profile_pin_after_v2_activation() -> None:
+    async with _database_case() as case, asyncio.timeout(10):
+        handler = _handler(case)
+        command = _command(case, key="profile-v1-replay")
+
+        original = await handler.handle(actor=case.actor, command=command)
+        await _activate_profile_v2(case)
+        replayed = await handler.handle(actor=case.actor, command=command)
+        graph = await _load_graph(case)
+        profiles, assignment = await _load_profile_state(case)
+
+        assert replayed == replace(original, replayed=True)
+        assert len(graph.agent_runs) == 1
+        assert graph.agent_runs[0].assistant_profile_version == 1
+        assert {profile.version for profile in profiles} == {1, 2}
+        assert assignment is not None
+        assert assignment.profile_version == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_new_idempotency_key_pins_newly_activated_profile_version() -> None:
+    async with _database_case() as case, asyncio.timeout(10):
+        handler = _handler(case)
+
+        first = await handler.handle(
+            actor=case.actor,
+            command=_command(case, key="profile-pin-v1"),
+        )
+        await _activate_profile_v2(case)
+        second = await handler.handle(
+            actor=case.actor,
+            command=_command(
+                case,
+                key="profile-pin-v2",
+                content="Explain immutable profile version pins.",
+            ),
+        )
+        graph = await _load_graph(case)
+
+        runs_by_id = {record.id: record for record in graph.agent_runs}
+        assert runs_by_id[first.agent_run_id.value].assistant_profile_version == 1
+        assert runs_by_id[second.agent_run_id.value].assistant_profile_version == 2
+        assert second.conversation_version == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_concurrent_identical_same_scope_creates_one_original_and_one_replay() -> None:
     async with _database_case() as case, asyncio.timeout(10):
         authorizer = _BarrierOwnerAuthorizer(asyncio.Barrier(2))
@@ -633,7 +791,7 @@ async def test_concurrent_different_keys_cas_one_winner_without_partial_loser() 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_staged_constraint_failure_rolls_back_cas_and_every_new_record() -> None:
+async def test_staged_constraint_failure_rolls_back_profile_graph_and_turn() -> None:
     sentinel_event_id = EventId.new()
 
     async with (
@@ -653,6 +811,7 @@ async def test_staged_constraint_failure_rolls_back_cas_and_every_new_record() -
             )
 
         graph = await _load_graph(case)
+        profiles, assignment = await _load_profile_state(case)
 
         assert graph.conversation.version == 0
         assert graph.conversation.last_message_sequence == 0
@@ -662,6 +821,8 @@ async def test_staged_constraint_failure_rolls_back_cas_and_every_new_record() -
         assert len(graph.outbox_events) == 1
         assert graph.outbox_events[0].id == sentinel_event_id.value
         assert graph.outbox_events[0].aggregate_version == 99
+        assert profiles == ()
+        assert assignment is None
 
 
 @pytest.mark.parametrize("case_name", ["unauthorized", "missing"])

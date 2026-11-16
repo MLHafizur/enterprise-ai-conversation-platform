@@ -1,8 +1,14 @@
 from fastapi import FastAPI
 
+from enterprise_chat_platform.api.assistant_profiles import (
+    router as assistant_profiles_router,
+)
 from enterprise_chat_platform.api.auth import router as auth_router
 from enterprise_chat_platform.api.conversations import router as conversations_router
+from enterprise_chat_platform.api.governance import router as governance_router
 from enterprise_chat_platform.api.health import router as health_router
+from enterprise_chat_platform.api.human_reviews import router as human_reviews_router
+from enterprise_chat_platform.api.policy_notices import router as policy_notices_router
 from enterprise_chat_platform.api.queries import router as queries_router
 from enterprise_chat_platform.api.tenant import router as tenant_router
 from enterprise_chat_platform.api.turns import router as turns_router
@@ -57,9 +63,13 @@ def create_app(
 
     application.include_router(auth_router)
     application.include_router(health_router)
+    application.include_router(assistant_profiles_router)
     application.include_router(conversations_router)
     application.include_router(turns_router)
     application.include_router(queries_router)
+    application.include_router(policy_notices_router)
+    application.include_router(governance_router)
+    application.include_router(human_reviews_router)
     application.include_router(tenant_router)
     application.include_router(websocket_router)
     return application

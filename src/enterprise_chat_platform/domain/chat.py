@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Self
 
 from enterprise_chat_platform.domain.agent_run import AgentRun
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfileRef
 from enterprise_chat_platform.domain.errors import (
     DomainValidationError,
     InvalidStateTransitionError,
@@ -154,6 +155,7 @@ class Conversation:
         actor_id: UserId,
         message_id: MessageId,
         agent_run_id: AgentRunId,
+        assistant_profile_ref: AssistantProfileRef,
         content: str,
         idempotency_key: IdempotencyKey,
         at: datetime,
@@ -190,6 +192,7 @@ class Conversation:
             tenant_id=self.tenant_id,
             conversation_id=self.id,
             input_message_id=message.id,
+            assistant_profile_ref=assistant_profile_ref,
             created_at=accepted_at,
         )
 

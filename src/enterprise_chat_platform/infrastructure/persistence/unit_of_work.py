@@ -15,6 +15,7 @@ from enterprise_chat_platform.application.accept_user_turn import (
 )
 from enterprise_chat_platform.application.errors import ConversationConcurrencyError
 from enterprise_chat_platform.domain.agent_run import AgentRunStatus
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfile
 from enterprise_chat_platform.domain.chat import AcceptedUserTurn, Conversation
 from enterprise_chat_platform.domain.identifiers import ConversationId, TenantId
 from enterprise_chat_platform.domain.primitives import normalize_utc
@@ -23,6 +24,9 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.agent_run import (
     SqlAlchemyAgentRunRepository,
+)
+from enterprise_chat_platform.infrastructure.persistence.repositories.assistant_profile import (
+    SqlAlchemyAssistantProfileRepository,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.conversation import (
     SqlAlchemyConversationRepository,
@@ -57,6 +61,7 @@ class SqlAlchemyAcceptUserTurnUnitOfWork:
         self._receipt_repository: SqlAlchemyIdempotencyReceiptRepository | None = None
         self._message_repository: SqlAlchemyMessageRepository | None = None
         self._agent_run_repository: SqlAlchemyAgentRunRepository | None = None
+        self._assistant_profile_repository: SqlAlchemyAssistantProfileRepository | None = None
         self._outbox_repository: SqlAlchemyOutboxEventRepository | None = None
         self._pending_turn: _PendingAcceptedTurn | None = None
         self._entered = False
@@ -76,6 +81,7 @@ class SqlAlchemyAcceptUserTurnUnitOfWork:
             receipt_repository = SqlAlchemyIdempotencyReceiptRepository(session)
             message_repository = SqlAlchemyMessageRepository(session)
             agent_run_repository = SqlAlchemyAgentRunRepository(session)
+            assistant_profile_repository = SqlAlchemyAssistantProfileRepository(session)
             outbox_repository = SqlAlchemyOutboxEventRepository(session)
         except BaseException:
             try:
@@ -91,6 +97,7 @@ class SqlAlchemyAcceptUserTurnUnitOfWork:
         self._receipt_repository = receipt_repository
         self._message_repository = message_repository
         self._agent_run_repository = agent_run_repository
+        self._assistant_profile_repository = assistant_profile_repository
         self._outbox_repository = outbox_repository
 
         return self
@@ -142,6 +149,20 @@ class SqlAlchemyAcceptUserTurnUnitOfWork:
         repository = self._require_repository(self._receipt_repository)
         await repository.acquire_scope_lock(scope=scope)
         return await repository.get(scope=scope)
+
+    async def get_or_create_active_assistant_profile(
+        self,
+        *,
+        tenant_id: TenantId,
+        default_profile: AssistantProfile,
+    ) -> AssistantProfile:
+        """Lock and return the exact profile revision this turn will pin."""
+        self._require_active_transaction()
+        repository = self._require_repository(self._assistant_profile_repository)
+        return await repository.get_or_create_active(
+            tenant_id=tenant_id,
+            default_profile=default_profile,
+        )
 
     def stage_accepted_turn(
         self,
@@ -235,6 +256,7 @@ class SqlAlchemyAcceptUserTurnUnitOfWork:
         self._receipt_repository = None
         self._message_repository = None
         self._agent_run_repository = None
+        self._assistant_profile_repository = None
         self._outbox_repository = None
         self._pending_turn = None
 

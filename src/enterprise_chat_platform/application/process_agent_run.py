@@ -5,14 +5,20 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from enterprise_chat_platform.application.tenant_prompting import AgentPromptBuilder
 from enterprise_chat_platform.domain.agent_run import AgentRunFailure
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfile
 from enterprise_chat_platform.domain.chat import MAX_USER_MESSAGE_LENGTH
+from enterprise_chat_platform.domain.governance import (
+    PolicyAction,
+    PolicyAssessment,
+)
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
     ConversationId,
@@ -21,7 +27,9 @@ from enterprise_chat_platform.domain.identifiers import (
     TenantId,
     UserId,
 )
+from enterprise_chat_platform.domain.input_policy import InputPolicyEngine
 from enterprise_chat_platform.domain.primitives import normalize_utc
+from enterprise_chat_platform.domain.prompting import PromptPlan, PromptTurn
 
 PROVIDER_TERMINAL_FAILURE = AgentRunFailure(
     code="provider_rejected_request",
@@ -34,6 +42,14 @@ PROVIDER_UNAVAILABLE_FAILURE = AgentRunFailure(
 PROVIDER_INVALID_RESPONSE_FAILURE = AgentRunFailure(
     code="provider_invalid_response",
     safe_message="The assistant returned an invalid response.",
+)
+INPUT_POLICY_BLOCKED_FAILURE = AgentRunFailure(
+    code="input_policy_blocked",
+    safe_message="The request was blocked by conversation policy.",
+)
+INPUT_POLICY_ESCALATED_FAILURE = AgentRunFailure(
+    code="input_policy_escalated",
+    safe_message="The request requires human review and was not sent to the assistant.",
 )
 
 
@@ -53,7 +69,8 @@ class ChatRequest:
     conversation_id: ConversationId
     agent_run_id: AgentRunId
     input_message_id: MessageId
-    input_content: str
+    input_content: str = field(repr=False)
+    prompt: PromptPlan | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -78,13 +95,17 @@ class ClaimedAgentRun:
     conversation_id: ConversationId
     agent_run_id: AgentRunId
     input_message_id: MessageId
-    input_content: str
+    input_content: str = field(repr=False)
+    assistant_profile: AssistantProfile = field(repr=False)
     lease_token: UUID
     attempt_count: int
+    context_messages: tuple[PromptTurn, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if self.attempt_count <= 0:
             raise ValueError("Claimed attempt count must be positive")
+        if self.assistant_profile.tenant_id != self.tenant_id:
+            raise ValueError("Claimed assistant profile must belong to the job tenant")
 
 
 class AgentRunJobStore(Protocol):
@@ -96,6 +117,21 @@ class AgentRunJobStore(Protocol):
         now: datetime,
         lease_duration: timedelta,
     ) -> ClaimedAgentRun | None: ...
+
+    async def apply_input_policy(
+        self,
+        *,
+        job: ClaimedAgentRun,
+        assessment: PolicyAssessment,
+        assessed_at: datetime,
+    ) -> PolicyAssessment | None:
+        """Persist the winning decision and atomically apply terminal actions.
+
+        Return the durable first-write-wins assessment, or ``None`` when the
+        caller no longer owns a live lease. BLOCK and ESCALATE decisions must
+        terminalize the run and publish its queued event in this transaction.
+        """
+        ...
 
     async def complete(
         self,
@@ -169,6 +205,8 @@ class AgentRunWorkResult(StrEnum):
     SUCCEEDED = "succeeded"
     RESCHEDULED = "rescheduled"
     FAILED = "failed"
+    POLICY_BLOCKED = "policy_blocked"
+    POLICY_ESCALATED = "policy_escalated"
     LEASE_LOST = "lease_lost"
 
 
@@ -180,18 +218,22 @@ class ProcessAgentRunWorker:
         *,
         store: AgentRunJobStore,
         provider: ChatProvider,
+        input_policy: InputPolicyEngine,
         clock: AgentRunWorkerClock,
         ids: AgentRunWorkerIds,
         service_author_id: UserId,
         config: AgentRunWorkerConfig,
+        prompt_builder: AgentPromptBuilder | None = None,
         random_value: Callable[[], float] = random.random,
     ) -> None:
         self._store = store
         self._provider = provider
+        self._input_policy = input_policy
         self._clock = clock
         self._ids = ids
         self._service_author_id = service_author_id
         self._config = config
+        self._prompt_builder = prompt_builder
         self._random_value = random_value
 
     async def process_next(self) -> AgentRunWorkResult:
@@ -207,6 +249,28 @@ class ProcessAgentRunWorker:
         if job is None:
             return AgentRunWorkResult.NO_WORK
 
+        # Evaluate every claimed run before any provider ceiling or paid call.
+        # The store returns the already-persisted decision when this is a retry;
+        # only that durable decision is authoritative.
+        candidate_assessment = self._input_policy.evaluate(
+            content=job.input_content,
+        )
+        assessed_at = normalize_utc(
+            self._clock.now(),
+            field_name="agent_run_worker.policy_assessed_at",
+        )
+        assessment = await self._store.apply_input_policy(
+            job=job,
+            assessment=candidate_assessment,
+            assessed_at=assessed_at,
+        )
+        if assessment is None:
+            return AgentRunWorkResult.LEASE_LOST
+        if assessment.action is PolicyAction.BLOCK:
+            return AgentRunWorkResult.POLICY_BLOCKED
+        if assessment.action is PolicyAction.ESCALATE:
+            return AgentRunWorkResult.POLICY_ESCALATED
+
         # A crash may occur after a provider call but before completion commits.
         # Reclaimed leases still count as attempts, so enforce the paid-call
         # ceiling before invoking the provider again.
@@ -216,12 +280,21 @@ class ProcessAgentRunWorker:
                 failure=PROVIDER_UNAVAILABLE_FAILURE,
             )
 
+        prompt = (
+            self._prompt_builder.build(
+                profile=job.assistant_profile,
+                context_messages=job.context_messages,
+            )
+            if self._prompt_builder is not None
+            else None
+        )
         request = ChatRequest(
             tenant_id=job.tenant_id,
             conversation_id=job.conversation_id,
             agent_run_id=job.agent_run_id,
             input_message_id=job.input_message_id,
             input_content=job.input_content,
+            prompt=prompt,
         )
 
         try:

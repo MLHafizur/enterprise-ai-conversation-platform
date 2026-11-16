@@ -5,8 +5,10 @@ from enterprise_chat_platform.domain.agent_run import (
     AgentRunFailure,
     AgentRunStatus,
 )
+from enterprise_chat_platform.domain.assistant_profile import AssistantProfileRef
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
+    AssistantProfileId,
     ConversationId,
     MessageId,
     TenantId,
@@ -31,6 +33,8 @@ def agent_run_to_new_record(
         id=agent_run.id.value,
         conversation_id=agent_run.conversation_id.value,
         input_message_id=agent_run.input_message_id.value,
+        assistant_profile_id=agent_run.assistant_profile_ref.id.value,
+        assistant_profile_version=agent_run.assistant_profile_ref.version,
         status=agent_run.status.value,
         created_at=agent_run.created_at,
         started_at=agent_run.started_at,
@@ -59,6 +63,10 @@ def agent_run_from_record(record: AgentRunRecord) -> AgentRun:
         tenant_id=TenantId(record.tenant_id),
         conversation_id=ConversationId(record.conversation_id),
         input_message_id=MessageId(record.input_message_id),
+        assistant_profile_ref=AssistantProfileRef(
+            id=AssistantProfileId(record.assistant_profile_id),
+            version=record.assistant_profile_version,
+        ),
         status=AgentRunStatus(record.status),
         created_at=record.created_at,
         started_at=record.started_at,

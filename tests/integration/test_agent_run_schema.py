@@ -8,6 +8,7 @@ from sqlalchemy import insert, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     create_async_engine,
 )
@@ -18,6 +19,7 @@ from enterprise_chat_platform.infrastructure.persistence.database import (
 )
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
+    AssistantProfileVersionRecord,
     ConversationRecord,
     MessageRecord,
 )
@@ -28,6 +30,8 @@ from enterprise_chat_platform.settings import (
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 BASE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
+ASSISTANT_PROFILE_ID = UUID("00000000-0000-4000-8000-000000000201")
+ASSISTANT_PROFILE_VERSION = 1
 
 
 def _create_local_runtime_engine() -> AsyncEngine:
@@ -95,6 +99,8 @@ def _queued_agent_run_values(
         "id": uuid4(),
         "conversation_id": conversation_id,
         "input_message_id": input_message_id,
+        "assistant_profile_id": ASSISTANT_PROFILE_ID,
+        "assistant_profile_version": ASSISTANT_PROFILE_VERSION,
         "status": "queued",
         "created_at": BASE_TIME,
         "started_at": None,
@@ -108,6 +114,30 @@ def _queued_agent_run_values(
         values.update(overrides)
 
     return values
+
+
+async def _insert_assistant_profile(
+    connection: AsyncConnection,
+    *,
+    tenant_id: UUID,
+) -> None:
+    """Insert the immutable profile revision referenced by a test run."""
+    await connection.execute(
+        insert(AssistantProfileVersionRecord).values(
+            tenant_id=tenant_id,
+            profile_id=ASSISTANT_PROFILE_ID,
+            version=ASSISTANT_PROFILE_VERSION,
+            prompt_template_version="enterprise-chat.v1",
+            assistant_name="Schema Test Assistant",
+            organization_name="Schema Test Organization",
+            response_tone="professional",
+            expertise="senior_engineer",
+            communication_style="direct_helpful",
+            context_character_limit=4_096,
+            created_at=BASE_TIME,
+            created_by=uuid4(),
+        )
+    )
 
 
 @pytest.mark.integration
@@ -181,6 +211,7 @@ async def test_runtime_role_can_insert_valid_queued_agent_run() -> None:
                 transaction = await connection.begin()
 
                 try:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     await connection.execute(
                         insert(ConversationRecord).values(
                             _conversation_values(
@@ -228,6 +259,7 @@ async def test_database_rejects_input_message_from_another_conversation() -> Non
         async with asyncio.timeout(5):
             with pytest.raises(IntegrityError) as exc_info:
                 async with engine.begin() as connection:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     await connection.execute(
                         insert(ConversationRecord).values(
                             _conversation_values(
@@ -323,6 +355,7 @@ async def test_database_rejects_invalid_agent_run_lifecycle(
         async with asyncio.timeout(5):
             with pytest.raises(IntegrityError) as exc_info:
                 async with engine.begin() as connection:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     await connection.execute(
                         insert(ConversationRecord).values(
                             _conversation_values(
@@ -418,6 +451,7 @@ async def test_database_accepts_valid_non_success_lifecycle(
                 transaction = await connection.begin()
 
                 try:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     await connection.execute(
                         insert(ConversationRecord).values(
                             _conversation_values(
@@ -468,6 +502,7 @@ async def test_database_accepts_valid_succeeded_agent_run() -> None:
                 transaction = await connection.begin()
 
                 try:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     conversation_values = _conversation_values(
                         tenant_id=tenant_id,
                         conversation_id=conversation_id,
@@ -540,6 +575,7 @@ async def test_database_rejects_output_message_from_another_conversation() -> No
         async with asyncio.timeout(5):
             with pytest.raises(IntegrityError) as exc_info:
                 async with engine.begin() as connection:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     await connection.execute(
                         insert(ConversationRecord).values(
                             _conversation_values(
@@ -668,6 +704,7 @@ async def test_database_rejects_malformed_agent_run_data(
         async with asyncio.timeout(5):
             with pytest.raises(IntegrityError) as exc_info:
                 async with engine.begin() as connection:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     await connection.execute(
                         insert(ConversationRecord).values(
                             _conversation_values(
@@ -714,6 +751,7 @@ async def test_database_rejects_input_message_from_another_tenant() -> None:
         async with asyncio.timeout(5):
             with pytest.raises(IntegrityError) as exc_info:
                 async with engine.begin() as connection:
+                    await _insert_assistant_profile(connection, tenant_id=tenant_id)
                     # Both tenants deliberately use the same conversation UUID.
                     await connection.execute(
                         insert(ConversationRecord).values(

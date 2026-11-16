@@ -37,12 +37,15 @@ async def test_worker_stops_and_disposes_engine() -> None:
     settings = Settings(
         database_url=SecretStr(DATABASE_URL),
         provider_mode="echo",
+        _env_file=None,
     )
     stop_event = asyncio.Event()
     engine = MagicMock()
     engine.dispose = AsyncMock()
     session_factory = MagicMock()
     process_worker = MagicMock()
+    input_policy = MagicMock()
+    prompt_builder = MagicMock()
 
     async def process_next() -> AgentRunWorkResult:
         stop_event.set()
@@ -62,15 +65,30 @@ async def test_worker_stops_and_disposes_engine() -> None:
         patch(
             "enterprise_chat_platform.worker.ProcessAgentRunWorker",
             return_value=process_worker,
-        ),
+        ) as worker_constructor,
+        patch(
+            "enterprise_chat_platform.worker.build_conversation_input_policy",
+            return_value=input_policy,
+        ) as build_input_policy,
+        patch(
+            "enterprise_chat_platform.worker.TenantPromptBuilder",
+            return_value=prompt_builder,
+        ) as prompt_builder_constructor,
     ):
         await run_worker(settings=settings, stop_event=stop_event)
 
+    build_input_policy.assert_called_once_with()
+    prompt_builder_constructor.assert_called_once_with()
+    assert worker_constructor.call_args.kwargs["input_policy"] is input_policy
+    assert worker_constructor.call_args.kwargs["prompt_builder"] is prompt_builder
     engine.dispose.assert_awaited_once_with()
 
 
 def test_worker_provider_is_disabled_by_default() -> None:
-    settings = Settings(database_url=SecretStr(DATABASE_URL))
+    settings = Settings(
+        database_url=SecretStr(DATABASE_URL),
+        _env_file=None,
+    )
 
     with pytest.raises(RuntimeError, match="No chat provider is enabled"):
         _chat_provider(settings)
@@ -84,4 +102,5 @@ def test_deployed_environment_rejects_echo_provider() -> None:
             auth_mode="jwt",
             jwt_key=SecretStr("public-key-placeholder"),
             provider_mode="echo",
+            _env_file=None,
         )
