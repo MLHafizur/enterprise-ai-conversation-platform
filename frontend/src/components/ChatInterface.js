@@ -11,6 +11,7 @@ import {
   submitTurn
 } from '../conversations';
 import { useWebSocket } from '../hooks/useWebSocket';
+import InputPolicyNotice from './InputPolicyNotice';
 import MessageBubble from './MessageBubble';
 
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
@@ -358,7 +359,15 @@ const ChatInterface = ({
         )}
 
         {messages.map((item) => (
-          <MessageBubble key={item.id} message={item} />
+          <div key={item.id}>
+            <MessageBubble message={item} />
+            {(item.policyNotices || []).map((notice, noticeIndex) => (
+              <InputPolicyNotice
+                key={`${notice.action}-${notice.assessedAt}-${noticeIndex}`}
+                notice={notice}
+              />
+            ))}
+          </div>
         ))}
 
         {isWaitingForAssistant && (

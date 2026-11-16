@@ -63,17 +63,63 @@ describe('conversation API adapter', () => {
   });
 
   test('loads metadata and messages as one snapshot', async () => {
+    const messageId = '44444444-4444-4444-8444-444444444444';
     api.get.mockImplementation((url) => {
+      if (url.endsWith('/input-policy-notices')) {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                input_message_id: messageId,
+                action: 'block',
+                findings: [
+                  {
+                    severity: 'high',
+                    safe_message: 'This request cannot be processed automatically.'
+                  }
+                ],
+                assessed_at: '2026-11-16T20:00:00Z'
+              }
+            ]
+          }
+        });
+      }
       if (url.endsWith('/messages')) {
-        return Promise.resolve({ data: { items: [], next_cursor: null } });
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                id: messageId,
+                role: 'user',
+                content: 'Unsafe request',
+                sequence: 1,
+                created_at: '2026-11-16T19:59:00Z'
+              }
+            ],
+            next_cursor: null
+          }
+        });
       }
       return Promise.resolve({ data: { id: 'conversation-id', version: 1 } });
     });
 
     await expect(fetchConversationSnapshot('conversation-id')).resolves.toEqual({
       conversation: { id: 'conversation-id', version: 1 },
-      messages: []
+      messages: [
+        expect.objectContaining({
+          id: messageId,
+          policyNotices: [
+            expect.objectContaining({
+              inputMessageId: messageId,
+              action: 'block'
+            })
+          ]
+        })
+      ]
     });
+    expect(api.get).toHaveBeenCalledWith(
+      '/v1/conversations/conversation-id/input-policy-notices'
+    );
   });
 });
 
@@ -127,5 +173,41 @@ describe('message reconciliation', () => {
       sequence: 1,
       optimistic: false
     });
+  });
+
+  test('preserves a durable notice when the same persisted message is merged again', () => {
+    const policyNotices = Object.freeze([
+      Object.freeze({
+        inputMessageId: 'message-id',
+        action: 'escalate',
+        findings: Object.freeze([]),
+        assessedAt: '2026-11-16T20:00:00Z'
+      })
+    ]);
+
+    const result = mergeMessages(
+      [
+        {
+          id: 'message-id',
+          role: 'user',
+          content: 'Review this',
+          sequence: 1,
+          timestamp: '2026-11-16T19:59:00Z',
+          policyNotices
+        }
+      ],
+      [
+        {
+          id: 'message-id',
+          role: 'user',
+          content: 'Review this',
+          sequence: 1,
+          created_at: '2026-11-16T19:59:00Z'
+        }
+      ],
+      'conversation-id'
+    );
+
+    expect(result[0].policyNotices).toBe(policyNotices);
   });
 });
