@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from enterprise_chat_platform.application.tenant_prompting import AgentPromptBuilder
 from enterprise_chat_platform.domain.agent_run import AgentRunFailure
 from enterprise_chat_platform.domain.chat import MAX_USER_MESSAGE_LENGTH
 from enterprise_chat_platform.domain.governance import (
@@ -27,6 +28,7 @@ from enterprise_chat_platform.domain.identifiers import (
 )
 from enterprise_chat_platform.domain.input_policy import InputPolicyEngine
 from enterprise_chat_platform.domain.primitives import normalize_utc
+from enterprise_chat_platform.domain.prompting import PromptPlan, PromptTurn
 
 PROVIDER_TERMINAL_FAILURE = AgentRunFailure(
     code="provider_rejected_request",
@@ -66,7 +68,8 @@ class ChatRequest:
     conversation_id: ConversationId
     agent_run_id: AgentRunId
     input_message_id: MessageId
-    input_content: str
+    input_content: str = field(repr=False)
+    prompt: PromptPlan | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -91,9 +94,10 @@ class ClaimedAgentRun:
     conversation_id: ConversationId
     agent_run_id: AgentRunId
     input_message_id: MessageId
-    input_content: str
+    input_content: str = field(repr=False)
     lease_token: UUID
     attempt_count: int
+    context_messages: tuple[PromptTurn, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if self.attempt_count <= 0:
@@ -215,6 +219,7 @@ class ProcessAgentRunWorker:
         ids: AgentRunWorkerIds,
         service_author_id: UserId,
         config: AgentRunWorkerConfig,
+        prompt_builder: AgentPromptBuilder | None = None,
         random_value: Callable[[], float] = random.random,
     ) -> None:
         self._store = store
@@ -224,6 +229,7 @@ class ProcessAgentRunWorker:
         self._ids = ids
         self._service_author_id = service_author_id
         self._config = config
+        self._prompt_builder = prompt_builder
         self._random_value = random_value
 
     async def process_next(self) -> AgentRunWorkResult:
@@ -270,12 +276,21 @@ class ProcessAgentRunWorker:
                 failure=PROVIDER_UNAVAILABLE_FAILURE,
             )
 
+        prompt = (
+            self._prompt_builder.build(
+                tenant_id=job.tenant_id,
+                context_messages=job.context_messages,
+            )
+            if self._prompt_builder is not None
+            else None
+        )
         request = ChatRequest(
             tenant_id=job.tenant_id,
             conversation_id=job.conversation_id,
             agent_run_id=job.agent_run_id,
             input_message_id=job.input_message_id,
             input_content=job.input_content,
+            prompt=prompt,
         )
 
         try:

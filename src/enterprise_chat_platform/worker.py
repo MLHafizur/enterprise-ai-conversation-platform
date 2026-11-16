@@ -15,6 +15,7 @@ from enterprise_chat_platform.application.process_agent_run import (
     ChatProvider,
     ProcessAgentRunWorker,
 )
+from enterprise_chat_platform.application.tenant_prompting import TenantPromptBuilder
 from enterprise_chat_platform.domain.conversation_policy import (
     build_conversation_input_policy,
 )
@@ -112,6 +113,7 @@ async def run_worker(
         ids=UuidWorkerIds(),
         service_author_id=UserId(resolved_settings.worker_service_author_id),
         config=_worker_config(resolved_settings),
+        prompt_builder=TenantPromptBuilder(),
     )
 
     logger.info("agent worker started")

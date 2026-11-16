@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from uuid import UUID, uuid5
 
 from enterprise_chat_platform.domain.identifiers import TenantId, UserId
+from enterprise_chat_platform.domain.prompting import (
+    PromptCommunicationStyle,
+    PromptExpertiseLevel,
+)
 
 DEMO_USER_NAMESPACE = UUID("f1dd116d-bf43-4e1e-a642-62676f784ae6")
 
@@ -21,6 +25,8 @@ class TenantDefinition:
     context_size_limit: int
     brand_name: str
     response_tone: str
+    assistant_expertise: PromptExpertiseLevel | None
+    assistant_style: PromptCommunicationStyle | None
     primary_color: str
 
 
@@ -35,6 +41,8 @@ DEMO_TENANTS = (
         context_size_limit=4_096,
         brand_name="Acme Assistant",
         response_tone="professional",
+        assistant_expertise=PromptExpertiseLevel.SENIOR_ENGINEER,
+        assistant_style=PromptCommunicationStyle.DIRECT_HELPFUL,
         primary_color="#4f46e5",
     ),
     TenantDefinition(
@@ -47,6 +55,8 @@ DEMO_TENANTS = (
         context_size_limit=2_048,
         brand_name="TechStart Support",
         response_tone="friendly",
+        assistant_expertise=PromptExpertiseLevel.PRODUCT_SPECIALIST,
+        assistant_style=PromptCommunicationStyle.CONCISE_SUPPORTIVE,
         primary_color="#059669",
     ),
 )

@@ -39,6 +39,11 @@ from enterprise_chat_platform.domain.identifiers import (
     TenantId,
     UserId,
 )
+from enterprise_chat_platform.domain.prompting import (
+    PromptPlan,
+    PromptRole,
+    PromptTurn,
+)
 
 TENANT_ID = TenantId.parse("11111111-1111-4111-8111-111111111111")
 CONVERSATION_ID = ConversationId.parse("22222222-2222-4222-8222-222222222222")
@@ -82,7 +87,11 @@ ESCALATE_ASSESSMENT = PolicyAssessment(
 )
 
 
-def _job(*, attempt_count: int = 1) -> ClaimedAgentRun:
+def _job(
+    *,
+    attempt_count: int = 1,
+    context_messages: tuple[PromptTurn, ...] = (),
+) -> ClaimedAgentRun:
     return ClaimedAgentRun(
         event_id=EVENT_ID,
         tenant_id=TENANT_ID,
@@ -92,6 +101,7 @@ def _job(*, attempt_count: int = 1) -> ClaimedAgentRun:
         input_content="How does a transactional outbox work?",
         lease_token=LEASE_TOKEN,
         attempt_count=attempt_count,
+        context_messages=context_messages,
     )
 
 
@@ -205,6 +215,21 @@ class StaticInputPolicy:
         return self.assessment
 
 
+class RecordingPromptBuilder:
+    def __init__(self, plan: PromptPlan) -> None:
+        self.plan = plan
+        self.calls: list[tuple[TenantId, tuple[PromptTurn, ...]]] = []
+
+    def build(
+        self,
+        *,
+        tenant_id: TenantId,
+        context_messages: tuple[PromptTurn, ...],
+    ) -> PromptPlan:
+        self.calls.append((tenant_id, context_messages))
+        return self.plan
+
+
 class ErrorProvider:
     def __init__(self, error: Exception) -> None:
         self.error = error
@@ -219,6 +244,20 @@ class SlowProvider:
         del request
         await asyncio.sleep(60)
         raise AssertionError("Provider timeout did not cancel the call")
+
+
+def test_provider_request_and_claimed_job_repr_hide_message_content() -> None:
+    job = _job()
+    request = ChatRequest(
+        tenant_id=TENANT_ID,
+        conversation_id=CONVERSATION_ID,
+        agent_run_id=RUN_ID,
+        input_message_id=INPUT_MESSAGE_ID,
+        input_content="private-current-message",
+    )
+
+    assert "How does a transactional outbox work?" not in repr(job)
+    assert "private-current-message" not in repr(request)
 
 
 def _config(
@@ -242,6 +281,7 @@ def _worker(
     provider: StaticProvider | ErrorProvider | SlowProvider,
     clock: FakeClock,
     input_policy: StaticInputPolicy | None = None,
+    prompt_builder: RecordingPromptBuilder | None = None,
     config: AgentRunWorkerConfig | None = None,
     random_value: float = 0.5,
 ) -> ProcessAgentRunWorker:
@@ -253,6 +293,7 @@ def _worker(
         ids=FixedIds(),
         service_author_id=SERVICE_AUTHOR_ID,
         config=config or _config(),
+        prompt_builder=prompt_builder,
         random_value=lambda: random_value,
     )
 
@@ -291,6 +332,56 @@ async def test_success_calls_provider_between_claim_and_atomic_completion() -> N
     assert store.rescheduled == []
     assert store.failed == []
     assert store.policy_applications == [(_job(), ALLOW_ASSESSMENT, ASSESSED_AT)]
+
+
+@pytest.mark.asyncio
+async def test_versioned_prompt_is_built_from_claimed_context_with_current_input_separate() -> None:
+    context = (
+        PromptTurn(
+            role=PromptRole.USER,
+            content="Earlier question",
+            sequence=1,
+        ),
+        PromptTurn(
+            role=PromptRole.ASSISTANT,
+            content="Earlier answer",
+            sequence=2,
+        ),
+    )
+    job = _job(context_messages=context)
+    prompt = PromptPlan(
+        system_instruction="Follow the trusted policy.",
+        context_messages=context,
+        selected_message_count=2,
+        context_character_count=sum(len(message.content) for message in context),
+    )
+    prompt_builder = RecordingPromptBuilder(prompt)
+    store = FakeStore(job=job)
+    provider = StaticProvider(ChatCompletion(content="Current answer"))
+    worker = _worker(
+        store=store,
+        provider=provider,
+        prompt_builder=prompt_builder,
+        clock=FakeClock(STARTED_AT, ASSESSED_AT, FINISHED_AT),
+    )
+
+    assert await worker.process_next() is AgentRunWorkResult.SUCCEEDED
+    assert prompt_builder.calls == [(TENANT_ID, context)]
+    assert provider.requests == [
+        ChatRequest(
+            tenant_id=TENANT_ID,
+            conversation_id=CONVERSATION_ID,
+            agent_run_id=RUN_ID,
+            input_message_id=INPUT_MESSAGE_ID,
+            input_content="How does a transactional outbox work?",
+            prompt=prompt,
+        )
+    ]
+    assert provider.requests[0].prompt is not None
+    assert all(
+        message.content != provider.requests[0].input_content
+        for message in provider.requests[0].prompt.context_messages
+    )
 
 
 @pytest.mark.asyncio

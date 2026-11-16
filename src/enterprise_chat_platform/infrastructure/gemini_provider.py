@@ -12,6 +12,7 @@ from enterprise_chat_platform.application.process_agent_run import (
     TransientChatProviderError,
 )
 from enterprise_chat_platform.domain.chat import MAX_USER_MESSAGE_LENGTH
+from enterprise_chat_platform.domain.prompting import PromptRole
 
 DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -84,14 +85,7 @@ class GeminiChatProvider:
 
     async def complete(self, *, request: ChatRequest) -> ChatCompletion:
         """Return a bounded plain-text completion or a classified safe error."""
-        payload: dict[str, object] = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": request.input_content}],
-                }
-            ]
-        }
+        payload = _build_request_payload(request)
         response: AsyncHttpResponse | None = None
         try:
             response = await self._client.post(
@@ -122,6 +116,67 @@ class GeminiChatProvider:
             raise TerminalChatProviderError("Gemini returned an invalid response")
 
         return ChatCompletion(content=content)
+
+
+def _build_request_payload(request: ChatRequest) -> dict[str, object]:
+    """Map a provider-neutral prompt plan to Gemini without rewriting text."""
+    if request.prompt is None:
+        # Keep the established payload stable for callers that have not opted
+        # into structured prompt construction.
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": request.input_content}],
+                }
+            ]
+        }
+
+    contents: list[dict[str, object]] = []
+    for turn in request.prompt.context_messages:
+        _append_gemini_content(
+            contents,
+            role=_gemini_role(turn.role),
+            text=turn.content,
+        )
+    _append_gemini_content(
+        contents,
+        role="user",
+        text=request.input_content,
+    )
+    return {
+        "systemInstruction": {
+            "parts": [{"text": request.prompt.system_instruction}],
+        },
+        "contents": contents,
+    }
+
+
+def _gemini_role(role: PromptRole) -> str:
+    if role is PromptRole.USER:
+        return "user"
+    if role is PromptRole.ASSISTANT:
+        return "model"
+    raise RuntimeError("Prompt role cannot be mapped to Gemini")
+
+
+def _append_gemini_content(
+    contents: list[dict[str, object]],
+    *,
+    role: str,
+    text: str,
+) -> None:
+    """Keep Gemini roles alternating without concatenating message text."""
+    if contents and contents[-1]["role"] == role:
+        parts = cast(list[dict[str, str]], contents[-1]["parts"])
+        parts.append({"text": text})
+        return
+    contents.append(
+        {
+            "role": role,
+            "parts": [{"text": text}],
+        }
+    )
 
 
 def _read_response_text(response: AsyncHttpResponse) -> str | None:

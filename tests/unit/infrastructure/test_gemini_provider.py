@@ -17,6 +17,7 @@ from enterprise_chat_platform.domain.identifiers import (
     MessageId,
     TenantId,
 )
+from enterprise_chat_platform.domain.prompting import PromptPlan, PromptRole, PromptTurn
 from enterprise_chat_platform.infrastructure.gemini_provider import GeminiChatProvider
 
 API_KEY = "test-api-key-that-must-stay-secret"
@@ -64,13 +65,33 @@ class LibraryNetworkError(Exception):
     pass
 
 
-def _request(content: str = "Explain transactional outbox.") -> ChatRequest:
+def _request(
+    content: str = "Explain transactional outbox.",
+    *,
+    prompt: PromptPlan | None = None,
+) -> ChatRequest:
     return ChatRequest(
         tenant_id=TenantId.parse("11111111-1111-4111-8111-111111111111"),
         conversation_id=ConversationId.parse("22222222-2222-4222-8222-222222222222"),
         agent_run_id=AgentRunId.parse("33333333-3333-4333-8333-333333333333"),
         input_message_id=MessageId.parse("44444444-4444-4444-8444-444444444444"),
         input_content=content,
+        prompt=prompt,
+    )
+
+
+def _prompt_plan(
+    *,
+    system_instruction: str = "You are the trusted enterprise assistant.",
+    context_messages: tuple[PromptTurn, ...] = (),
+) -> PromptPlan:
+    return PromptPlan(
+        version="enterprise-chat-prompt.v1",
+        system_instruction=system_instruction,
+        context_messages=context_messages,
+        selected_message_count=len(context_messages),
+        omitted_message_count=0,
+        context_character_count=sum(len(turn.content) for turn in context_messages),
     )
 
 
@@ -117,6 +138,195 @@ async def test_calls_generate_content_and_parses_text_parts() -> None:
         ]
     }
     assert timeout == 12.5
+
+
+@pytest.mark.asyncio
+async def test_maps_structured_prompt_to_ordered_gemini_contents() -> None:
+    current_input = "Current input {must remain exact}."
+    system_instruction = "Trusted instruction; never contains the current input."
+    prompt = _prompt_plan(
+        system_instruction=system_instruction,
+        context_messages=(
+            PromptTurn(
+                role=PromptRole.USER,
+                content="Earlier user text.",
+                sequence=1,
+            ),
+            PromptTurn(
+                role=PromptRole.ASSISTANT,
+                content="Earlier assistant text.",
+                sequence=2,
+            ),
+        ),
+    )
+    client = RecordingClient(
+        response=StubResponse(
+            status_code=200,
+            payload=_success_payload({"text": "Structured response"}),
+        )
+    )
+    provider = GeminiChatProvider(client=client, api_key=API_KEY, model="gemini-test-model")
+
+    await provider.complete(request=_request(current_input, prompt=prompt))
+
+    payload = client.calls[0][2]
+    assert payload == {
+        "systemInstruction": {
+            "parts": [{"text": system_instruction}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": "Earlier user text."}],
+            },
+            {
+                "role": "model",
+                "parts": [{"text": "Earlier assistant text."}],
+            },
+            {
+                "role": "user",
+                "parts": [{"text": current_input}],
+            },
+        ],
+    }
+    assert current_input not in str(payload["systemInstruction"])
+    assert str(payload).count(current_input) == 1
+
+
+@pytest.mark.asyncio
+async def test_coalesces_consecutive_user_context_and_current_input_without_rewriting() -> None:
+    current_input = "Second user turn {exact}."
+    prompt = _prompt_plan(
+        context_messages=(
+            PromptTurn(
+                role=PromptRole.USER,
+                content="First user turn.",
+                sequence=1,
+            ),
+        )
+    )
+    client = RecordingClient(
+        response=StubResponse(
+            status_code=200,
+            payload=_success_payload({"text": "Response"}),
+        )
+    )
+    provider = GeminiChatProvider(client=client, api_key=API_KEY, model="gemini-test-model")
+
+    await provider.complete(request=_request(current_input, prompt=prompt))
+
+    payload = client.calls[0][2]
+    assert payload["contents"] == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "First user turn."},
+                {"text": current_input},
+            ],
+        }
+    ]
+    assert str(payload).count(current_input) == 1
+
+
+@pytest.mark.asyncio
+async def test_coalesces_consecutive_assistant_context_without_rewriting() -> None:
+    prompt = _prompt_plan(
+        context_messages=(
+            PromptTurn(
+                role=PromptRole.USER,
+                content="Earlier question.",
+                sequence=1,
+            ),
+            PromptTurn(
+                role=PromptRole.ASSISTANT,
+                content="First assistant part.",
+                sequence=2,
+            ),
+            PromptTurn(
+                role=PromptRole.ASSISTANT,
+                content="Second assistant part.",
+                sequence=3,
+            ),
+        )
+    )
+    client = RecordingClient(
+        response=StubResponse(
+            status_code=200,
+            payload=_success_payload({"text": "Response"}),
+        )
+    )
+    provider = GeminiChatProvider(client=client, api_key=API_KEY, model="gemini-test-model")
+
+    await provider.complete(request=_request("Current question.", prompt=prompt))
+
+    assert client.calls[0][2]["contents"] == [
+        {
+            "role": "user",
+            "parts": [{"text": "Earlier question."}],
+        },
+        {
+            "role": "model",
+            "parts": [
+                {"text": "First assistant part."},
+                {"text": "Second assistant part."},
+            ],
+        },
+        {
+            "role": "user",
+            "parts": [{"text": "Current question."}],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_structured_prompt_with_empty_context_sends_current_input_once() -> None:
+    client = RecordingClient(
+        response=StubResponse(
+            status_code=200,
+            payload=_success_payload({"text": "Response"}),
+        )
+    )
+    provider = GeminiChatProvider(client=client, api_key=API_KEY, model="gemini-test-model")
+
+    await provider.complete(
+        request=_request(
+            "Only current input.",
+            prompt=_prompt_plan(system_instruction="Fixed trusted instruction."),
+        )
+    )
+
+    assert client.calls[0][2] == {
+        "systemInstruction": {
+            "parts": [{"text": "Fixed trusted instruction."}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": "Only current input."}],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_structured_prompt_details_do_not_escape_provider_errors() -> None:
+    secret_instruction = "confidential-system-instruction"
+    secret_input = "confidential-user-input"
+    client = RecordingClient(response=StubResponse(status_code=503, payload={}))
+    provider = GeminiChatProvider(client=client, api_key=API_KEY, model="gemini-test-model")
+
+    with pytest.raises(TransientChatProviderError) as caught:
+        await provider.complete(
+            request=_request(
+                secret_input,
+                prompt=_prompt_plan(system_instruction=secret_instruction),
+            )
+        )
+
+    assert str(caught.value) == "Gemini is temporarily unavailable"
+    assert secret_instruction not in str(caught.value)
+    assert secret_input not in str(caught.value)
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.asyncio

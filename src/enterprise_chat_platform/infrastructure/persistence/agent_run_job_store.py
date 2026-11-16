@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 
@@ -40,6 +40,7 @@ from enterprise_chat_platform.domain.identifiers import (
     UserId,
 )
 from enterprise_chat_platform.domain.primitives import IdempotencyKey, normalize_utc
+from enterprise_chat_platform.domain.prompting import PromptRole, PromptTurn
 from enterprise_chat_platform.infrastructure.persistence.database import (
     AsyncSessionFactory,
 )
@@ -52,6 +53,7 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.conversation im
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
     ConversationRecord,
+    InputPolicyAssessmentRecord,
     MessageRecord,
     OutboxEventRecord,
 )
@@ -71,6 +73,9 @@ from enterprise_chat_platform.infrastructure.persistence.repositories.message im
     SqlAlchemyMessageRepository,
 )
 
+DEFAULT_HISTORY_ROW_CAP = 20
+MAX_HISTORY_ROW_CAP = 50
+
 
 class SqlAlchemyAgentRunJobStore:
     """Fence worker attempts with leases and commit terminal changes atomically."""
@@ -78,8 +83,17 @@ class SqlAlchemyAgentRunJobStore:
     def __init__(
         self,
         session_factory: AsyncSessionFactory,
+        *,
+        history_row_cap: int = DEFAULT_HISTORY_ROW_CAP,
     ) -> None:
+        if (
+            type(history_row_cap) is not int
+            or history_row_cap < 1
+            or history_row_cap > MAX_HISTORY_ROW_CAP
+        ):
+            raise ValueError(f"History row cap must be between 1 and {MAX_HISTORY_ROW_CAP}")
         self._session_factory = session_factory
+        self._history_row_cap = history_row_cap
 
     async def claim_next(
         self,
@@ -111,6 +125,7 @@ class SqlAlchemyAgentRunJobStore:
                     record=record,
                     lease_token=lease_token,
                     input_content="",
+                    context_messages=(),
                 )
                 run_record = await _select_run_for_update(
                     session=session,
@@ -135,10 +150,19 @@ class SqlAlchemyAgentRunJobStore:
                 if input_record.role != MessageRole.USER.value:
                     raise RuntimeError("Agent run input must reference a user message")
 
+                context_messages = await _select_context_messages(
+                    session=session,
+                    job=job,
+                    input_sequence=input_record.sequence,
+                    input_created_at=input_record.created_at,
+                    row_cap=self._history_row_cap,
+                )
+
                 return _job_from_record(
                     record=record,
                     lease_token=lease_token,
                     input_content=input_record.content,
+                    context_messages=context_messages,
                 )
 
     async def complete(
@@ -530,6 +554,116 @@ async def _select_input_message(
     return record
 
 
+async def _select_context_messages(
+    *,
+    session: AsyncSession,
+    job: ClaimedAgentRun,
+    input_sequence: int,
+    input_created_at: datetime,
+    row_cap: int,
+) -> tuple[PromptTurn, ...]:
+    """Load only policy-allowed, proven history for the claimed conversation."""
+    statement = _context_messages_statement(
+        job=job,
+        input_sequence=input_sequence,
+        input_created_at=input_created_at,
+        row_cap=row_cap,
+    )
+    result = await session.execute(statement)
+    newest_first = tuple(result.scalars().all())
+    return tuple(_prompt_turn_from_record(record) for record in reversed(newest_first))
+
+
+def _context_messages_statement(
+    *,
+    job: ClaimedAgentRun,
+    input_sequence: int,
+    input_created_at: datetime,
+    row_cap: int,
+) -> Select[MessageRecord]:
+    """Build the tenant-safe prompt-history query for contract testing.
+
+    A user message is eligible only when the exact tenant-scoped run that
+    consumed it has an immutable allow assessment. An assistant message is
+    eligible only when an allowed, succeeded run in the same tenant and
+    conversation names it as its durable output. Both assessments must exist
+    no later than the current input's immutable creation time, so later writes
+    cannot change retry history. These positive proofs make blocked, escalated,
+    unassessed, legacy, and orphan messages fail closed.
+    """
+    allowed_user_message = (
+        select(AgentRunRecord.id)
+        .join(
+            InputPolicyAssessmentRecord,
+            and_(
+                InputPolicyAssessmentRecord.tenant_id == AgentRunRecord.tenant_id,
+                InputPolicyAssessmentRecord.agent_run_id == AgentRunRecord.id,
+            ),
+        )
+        .where(
+            AgentRunRecord.tenant_id == MessageRecord.tenant_id,
+            AgentRunRecord.conversation_id == MessageRecord.conversation_id,
+            AgentRunRecord.input_message_id == MessageRecord.id,
+            InputPolicyAssessmentRecord.action == PolicyAction.ALLOW.value,
+            InputPolicyAssessmentRecord.assessed_at <= input_created_at,
+        )
+        .exists()
+    )
+    successful_assistant_message = (
+        select(AgentRunRecord.id)
+        .join(
+            InputPolicyAssessmentRecord,
+            and_(
+                InputPolicyAssessmentRecord.tenant_id == AgentRunRecord.tenant_id,
+                InputPolicyAssessmentRecord.agent_run_id == AgentRunRecord.id,
+            ),
+        )
+        .where(
+            AgentRunRecord.tenant_id == MessageRecord.tenant_id,
+            AgentRunRecord.conversation_id == MessageRecord.conversation_id,
+            AgentRunRecord.output_message_id == MessageRecord.id,
+            AgentRunRecord.status == AgentRunStatus.SUCCEEDED.value,
+            InputPolicyAssessmentRecord.action == PolicyAction.ALLOW.value,
+            InputPolicyAssessmentRecord.assessed_at <= input_created_at,
+        )
+        .exists()
+    )
+
+    return (
+        select(MessageRecord)
+        .where(
+            MessageRecord.tenant_id == job.tenant_id.value,
+            MessageRecord.conversation_id == job.conversation_id.value,
+            MessageRecord.sequence < input_sequence,
+            or_(
+                and_(
+                    MessageRecord.role == MessageRole.USER.value,
+                    allowed_user_message,
+                ),
+                and_(
+                    MessageRecord.role == MessageRole.ASSISTANT.value,
+                    successful_assistant_message,
+                ),
+            ),
+        )
+        .order_by(MessageRecord.sequence.desc())
+        .limit(row_cap)
+    )
+
+
+def _prompt_turn_from_record(record: MessageRecord) -> PromptTurn:
+    try:
+        role = PromptRole(record.role)
+    except ValueError:
+        raise RuntimeError("Conversation history contains an unsupported message role") from None
+
+    return PromptTurn(
+        role=role,
+        content=record.content,
+        sequence=record.sequence,
+    )
+
+
 async def _select_conversation_for_update(
     *,
     session: AsyncSession,
@@ -555,6 +689,7 @@ def _job_from_record(
     record: OutboxEventRecord,
     lease_token: UUID,
     input_content: str,
+    context_messages: tuple[PromptTurn, ...],
 ) -> ClaimedAgentRun:
     payload = record.payload
     agent_run_id = _payload_uuid(payload=payload, key="agent_run_id")
@@ -570,6 +705,7 @@ def _job_from_record(
         agent_run_id=AgentRunId(agent_run_id),
         input_message_id=MessageId(input_message_id),
         input_content=input_content,
+        context_messages=context_messages,
         lease_token=lease_token,
         attempt_count=record.attempt_count,
     )
