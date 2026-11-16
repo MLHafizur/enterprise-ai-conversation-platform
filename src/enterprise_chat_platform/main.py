@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from enterprise_chat_platform.api.auth import router as auth_router
 from enterprise_chat_platform.api.conversations import router as conversations_router
+from enterprise_chat_platform.api.governance import router as governance_router
 from enterprise_chat_platform.api.health import router as health_router
 from enterprise_chat_platform.api.queries import router as queries_router
 from enterprise_chat_platform.api.tenant import router as tenant_router
@@ -60,6 +61,7 @@ def create_app(
     application.include_router(conversations_router)
     application.include_router(turns_router)
     application.include_router(queries_router)
+    application.include_router(governance_router)
     application.include_router(tenant_router)
     application.include_router(websocket_router)
     return application

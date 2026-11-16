@@ -116,11 +116,11 @@ def authenticate_access_token(
     )
 
 
-def _actor_from_jwt(
+def _principal_from_jwt(
     *,
     settings: Settings,
     authorization: str | None,
-) -> ActorContext:
+) -> AuthenticatedPrincipal:
     if authorization is None:
         raise _unauthorized()
 
@@ -132,10 +132,10 @@ def _actor_from_jwt(
     return authenticate_access_token(
         settings=settings,
         token=authorization_parts[1],
-    ).actor
+    )
 
 
-def get_actor_context(
+def get_authenticated_principal(
     settings: Annotated[Settings, Depends(get_runtime_settings)],
     authorization: Annotated[str | None, Header()] = None,
     development_tenant_id: Annotated[
@@ -146,16 +146,29 @@ def get_actor_context(
         str | None,
         Header(alias="X-Dev-User-Id"),
     ] = None,
-) -> ActorContext:
-    """Authenticate the request and return identity from trusted transport data."""
+) -> AuthenticatedPrincipal:
+    """Authenticate identity while preserving trusted authorization roles."""
     if settings.auth_mode == "development":
-        return _actor_from_development_headers(
-            settings=settings,
-            tenant_id=development_tenant_id,
-            user_id=development_user_id,
+        return AuthenticatedPrincipal(
+            actor=_actor_from_development_headers(
+                settings=settings,
+                tenant_id=development_tenant_id,
+                user_id=development_user_id,
+            ),
+            roles=frozenset(),
         )
 
-    return _actor_from_jwt(
+    return _principal_from_jwt(
         settings=settings,
         authorization=authorization,
     )
+
+
+def get_actor_context(
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(get_authenticated_principal),
+    ],
+) -> ActorContext:
+    """Return the authenticated actor for endpoints that do not need roles."""
+    return principal.actor
