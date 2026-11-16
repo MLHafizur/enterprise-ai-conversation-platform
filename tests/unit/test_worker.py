@@ -37,6 +37,7 @@ async def test_worker_stops_and_disposes_engine() -> None:
     settings = Settings(
         database_url=SecretStr(DATABASE_URL),
         provider_mode="echo",
+        _env_file=None,
     )
     stop_event = asyncio.Event()
     engine = MagicMock()
@@ -70,7 +71,10 @@ async def test_worker_stops_and_disposes_engine() -> None:
 
 
 def test_worker_provider_is_disabled_by_default() -> None:
-    settings = Settings(database_url=SecretStr(DATABASE_URL))
+    settings = Settings(
+        database_url=SecretStr(DATABASE_URL),
+        _env_file=None,
+    )
 
     with pytest.raises(RuntimeError, match="No chat provider is enabled"):
         _chat_provider(settings)
@@ -84,4 +88,5 @@ def test_deployed_environment_rejects_echo_provider() -> None:
             auth_mode="jwt",
             jwt_key=SecretStr("public-key-placeholder"),
             provider_mode="echo",
+            _env_file=None,
         )
