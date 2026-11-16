@@ -15,3 +15,11 @@ class IdempotencyConflictError(ApplicationError):
 
 class ConversationConcurrencyError(ApplicationError):
     """Raised when another writer changes a conversation first."""
+
+
+class HumanReviewNotFoundError(ApplicationError):
+    """Raised when a review case is missing from the actor's tenant."""
+
+
+class HumanReviewConflictError(ApplicationError):
+    """Raised when a review case changed before a requested transition."""

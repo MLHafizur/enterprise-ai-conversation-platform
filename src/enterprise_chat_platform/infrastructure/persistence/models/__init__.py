@@ -9,6 +9,9 @@ from enterprise_chat_platform.infrastructure.persistence.models.agent_run import
 from enterprise_chat_platform.infrastructure.persistence.models.conversation import (
     ConversationRecord,
 )
+from enterprise_chat_platform.infrastructure.persistence.models.human_review import (
+    HumanReviewRecord,
+)
 from enterprise_chat_platform.infrastructure.persistence.models.idempotency_receipt import (
     IdempotencyReceiptRecord,
 )
@@ -32,6 +35,7 @@ __all__ = [
     "AgentRunRecord",
     "ConversationRecord",
     "IdempotencyReceiptRecord",
+    "HumanReviewRecord",
     "MessageRecord",
     "OutboxEventRecord",
     "registered_model_metadata",

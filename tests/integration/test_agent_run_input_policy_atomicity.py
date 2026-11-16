@@ -4,23 +4,29 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from enterprise_chat_platform.application.accept_user_turn import AgentRunQueuedEvent
+from enterprise_chat_platform.application.errors import HumanReviewConflictError
 from enterprise_chat_platform.application.realtime_events import (
     AGENT_RUN_TERMINAL_EVENT_TYPE,
 )
+from enterprise_chat_platform.application.resolve_human_review import (
+    ResolveHumanReviewCommand,
+)
 from enterprise_chat_platform.domain.agent_run import AgentRunStatus
 from enterprise_chat_platform.domain.chat import Conversation
+from enterprise_chat_platform.domain.errors import DomainValidationError
 from enterprise_chat_platform.domain.governance import (
     PolicyAction,
     PolicyAssessment,
     PolicyFinding,
     PolicySeverity,
 )
+from enterprise_chat_platform.domain.human_review import HumanReview, HumanReviewResolution
 from enterprise_chat_platform.domain.identifiers import (
     AgentRunId,
     ConversationId,
@@ -53,9 +59,13 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.outbox_event im
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
     ConversationRecord,
+    HumanReviewRecord,
     InputPolicyAssessmentRecord,
     MessageRecord,
     OutboxEventRecord,
+)
+from enterprise_chat_platform.infrastructure.persistence.repositories.human_review import (
+    SqlAlchemyHumanReviewResolutionStore,
 )
 from enterprise_chat_platform.infrastructure.persistence.repositories.input_policy_assessment import (
     SqlAlchemyInputPolicyAssessmentRepository,
@@ -150,6 +160,12 @@ async def _cleanup_job(
 ) -> None:
     """Use the local migrator because runtime cannot delete audit records."""
     async with session_factory() as session, session.begin():
+        await session.execute(
+            delete(HumanReviewRecord).where(
+                HumanReviewRecord.tenant_id == event.tenant_id.value,
+                HumanReviewRecord.agent_run_id == event.agent_run_id.value,
+            )
+        )
         await session.execute(
             delete(InputPolicyAssessmentRecord).where(
                 InputPolicyAssessmentRecord.tenant_id == event.tenant_id.value,
@@ -246,6 +262,10 @@ async def test_allow_persists_assessment_and_retains_owned_lease() -> None:
                     InputPolicyAssessmentRecord,
                     (event.tenant_id.value, event.agent_run_id.value),
                 )
+                review = await session.get(
+                    HumanReviewRecord,
+                    (event.tenant_id.value, event.agent_run_id.value),
+                )
                 terminal_count = await session.scalar(
                     select(func.count())
                     .select_from(OutboxEventRecord)
@@ -258,6 +278,7 @@ async def test_allow_persists_assessment_and_retains_owned_lease() -> None:
             assert stored is not None
             assert stored.action is PolicyAction.ALLOW
             assert assessment is not None
+            assert review is None
             assert run is not None
             assert run.status == AgentRunStatus.RUNNING.value
             assert queued is not None
@@ -330,6 +351,10 @@ async def test_non_allow_decision_atomically_finishes_job(
                         )
                     )
                 ).scalar_one()
+                review = await session.get(
+                    HumanReviewRecord,
+                    (event.tenant_id.value, event.agent_run_id.value),
+                )
 
             assert stored is not None
             assert stored.action is action
@@ -349,6 +374,72 @@ async def test_non_allow_decision_atomically_finishes_job(
                 "conversation_version": event.conversation_version,
                 "message_sequence": None,
             }
+            if action is PolicyAction.ESCALATE:
+                assert review is not None
+                assert review.status == "pending"
+                assert review.version == 0
+                assert review.created_at == BASE_TIME + timedelta(seconds=2)
+
+                async def resolve_concurrently(
+                    resolution: HumanReviewResolution,
+                ) -> object:
+                    resolution_store = SqlAlchemyHumanReviewResolutionStore(runtime_factory)
+                    try:
+                        return await resolution_store.resolve(
+                            tenant_id=event.tenant_id,
+                            reviewer_id=UserId.new(),
+                            command=ResolveHumanReviewCommand(
+                                agent_run_id=event.agent_run_id,
+                                expected_version=0,
+                                resolution=resolution,
+                            ),
+                            resolved_at=BASE_TIME + timedelta(seconds=3),
+                        )
+                    except HumanReviewConflictError as error:
+                        return error
+
+                resolution_results = await asyncio.gather(
+                    resolve_concurrently(HumanReviewResolution.CONFIRMED),
+                    resolve_concurrently(HumanReviewResolution.DISMISSED),
+                )
+                resolved = [
+                    result
+                    for result in resolution_results
+                    if not isinstance(result, HumanReviewConflictError)
+                ]
+                conflicts = [
+                    result
+                    for result in resolution_results
+                    if isinstance(result, HumanReviewConflictError)
+                ]
+                assert len(resolved) == 1
+                assert len(conflicts) == 1
+                winning_review = resolved[0]
+                assert isinstance(winning_review, HumanReview)
+                assert winning_review.status.value == "resolved"
+                assert winning_review.version == 1
+
+                with pytest.raises(HumanReviewConflictError):
+                    await SqlAlchemyHumanReviewResolutionStore(runtime_factory).resolve(
+                        tenant_id=event.tenant_id,
+                        reviewer_id=UserId.new(),
+                        command=ResolveHumanReviewCommand(
+                            agent_run_id=event.agent_run_id,
+                            expected_version=0,
+                            resolution=HumanReviewResolution.DISMISSED,
+                        ),
+                        resolved_at=BASE_TIME + timedelta(seconds=4),
+                    )
+
+                async with runtime_factory() as session:
+                    terminal_run = await session.get(
+                        AgentRunRecord,
+                        (event.tenant_id.value, event.agent_run_id.value),
+                    )
+                assert terminal_run is not None
+                assert terminal_run.status == AgentRunStatus.FAILED.value
+            else:
+                assert review is None
     finally:
         await _cleanup_job(session_factory=migration_factory, event=event)
         await runtime_engine.dispose()
@@ -447,9 +538,86 @@ async def test_expired_lease_returns_none_without_persisting_decision() -> None:
                     InputPolicyAssessmentRecord,
                     (event.tenant_id.value, event.agent_run_id.value),
                 )
+                review = await session.get(
+                    HumanReviewRecord,
+                    (event.tenant_id.value, event.agent_run_id.value),
+                )
 
             assert stored is None
             assert assessment is None
+            assert review is None
+            assert run is not None
+            assert run.status == AgentRunStatus.RUNNING.value
+            assert queued is not None
+            assert queued.published_at is None
+            assert queued.lease_token == job.lease_token
+    finally:
+        await _cleanup_job(session_factory=migration_factory, event=event)
+        await runtime_engine.dispose()
+        await migration_engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_escalation_case_rolls_back_with_terminal_transition_failure() -> None:
+    runtime_engine, runtime_factory, migration_engine, migration_factory = _database_resources()
+    event = await _seed_job(session_factory=runtime_factory)
+    store = SqlAlchemyAgentRunJobStore(runtime_factory)
+
+    try:
+        async with asyncio.timeout(10):
+            job = await store.claim_next(
+                now=BASE_TIME + timedelta(seconds=1),
+                lease_duration=timedelta(seconds=30),
+            )
+            assert job is not None
+
+            # Zero is schema-valid but cannot identify a terminal notification.
+            # This forces failure after assessment/review insertion and proves the
+            # surrounding worker transaction rolls every policy effect back.
+            async with migration_factory() as session, session.begin():
+                await session.execute(
+                    update(OutboxEventRecord)
+                    .where(
+                        OutboxEventRecord.tenant_id == event.tenant_id.value,
+                        OutboxEventRecord.id == event.id.value,
+                    )
+                    .values(aggregate_version=0)
+                )
+
+            with pytest.raises(
+                DomainValidationError,
+                match="conversation version must be positive",
+            ):
+                await store.apply_input_policy(
+                    job=job,
+                    assessment=_assessment(
+                        PolicyAction.ESCALATE,
+                        version="conversation-input.rollback",
+                    ),
+                    assessed_at=BASE_TIME + timedelta(seconds=2),
+                )
+
+            async with runtime_factory() as session:
+                assessment = await session.get(
+                    InputPolicyAssessmentRecord,
+                    (event.tenant_id.value, event.agent_run_id.value),
+                )
+                review = await session.get(
+                    HumanReviewRecord,
+                    (event.tenant_id.value, event.agent_run_id.value),
+                )
+                run = await session.get(
+                    AgentRunRecord,
+                    (event.tenant_id.value, event.agent_run_id.value),
+                )
+                queued = await session.get(
+                    OutboxEventRecord,
+                    (event.tenant_id.value, event.id.value),
+                )
+
+            assert assessment is None
+            assert review is None
             assert run is not None
             assert run.status == AgentRunStatus.RUNNING.value
             assert queued is not None

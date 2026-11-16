@@ -3,6 +3,7 @@ import {
   ArrowRightOnRectangleIcon,
   ChatBubbleLeftRightIcon,
   ChatBubbleLeftIcon,
+  ClipboardDocumentCheckIcon,
   PlusIcon,
   ShieldCheckIcon,
   UserCircleIcon
@@ -24,6 +25,7 @@ const Sidebar = ({
   canViewGovernance,
   onShowChat,
   onShowCompliance,
+  onShowReviews,
   user,
   onLogout
 }) => (
@@ -43,19 +45,37 @@ const Sidebar = ({
         Chat
       </button>
       {canViewGovernance && (
-        <button
-          type="button"
-          onClick={onShowCompliance}
-          aria-current={activeView === 'compliance' ? 'page' : undefined}
-          className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-            activeView === 'compliance'
-              ? 'bg-indigo-50 text-indigo-700'
-              : 'text-gray-700 hover:bg-gray-50'
-          }`}
-        >
-          <ShieldCheckIcon className="h-5 w-5 mr-3" aria-hidden="true" />
-          Compliance
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={onShowCompliance}
+            aria-current={activeView === 'compliance' ? 'page' : undefined}
+            className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeView === 'compliance'
+                ? 'bg-indigo-50 text-indigo-700'
+                : 'text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <ShieldCheckIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+            Compliance
+          </button>
+          <button
+            type="button"
+            onClick={onShowReviews}
+            aria-current={activeView === 'reviews' ? 'page' : undefined}
+            className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeView === 'reviews'
+                ? 'bg-indigo-50 text-indigo-700'
+                : 'text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <ClipboardDocumentCheckIcon
+              className="h-5 w-5 mr-3"
+              aria-hidden="true"
+            />
+            Review queue
+          </button>
+        </>
       )}
     </nav>
 

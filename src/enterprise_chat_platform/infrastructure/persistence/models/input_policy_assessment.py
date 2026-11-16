@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     String,
+    UniqueConstraint,
     Uuid,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -69,6 +70,11 @@ class InputPolicyAssessmentRecord(Base):
             ],
             name="fk_input_policy_assessments_agent_run",
             ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "agent_run_id",
+            "action",
         ),
         CheckConstraint(
             "policy_version ~ '^[a-z0-9][a-z0-9._-]*$'",

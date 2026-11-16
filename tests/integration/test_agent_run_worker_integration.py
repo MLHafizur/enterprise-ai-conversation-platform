@@ -64,6 +64,7 @@ from enterprise_chat_platform.infrastructure.persistence.mappers.outbox_event im
 from enterprise_chat_platform.infrastructure.persistence.models import (
     AgentRunRecord,
     ConversationRecord,
+    HumanReviewRecord,
     InputPolicyAssessmentRecord,
     MessageRecord,
     OutboxEventRecord,
@@ -212,12 +213,18 @@ async def _cleanup_job(
     *,
     event: AgentRunQueuedEvent,
 ) -> None:
-    # Assessments are append-only to the runtime role, so cleanup uses the
-    # local migrator and deletes the child before its agent-run parent.
+    # Reviews and assessments are protected from runtime deletion, so cleanup
+    # uses the local migrator and follows their foreign-key dependency order.
     engine = _migration_cleanup_engine()
     session_factory = create_session_factory(engine)
     try:
         async with session_factory() as session, session.begin():
+            await session.execute(
+                delete(HumanReviewRecord).where(
+                    HumanReviewRecord.tenant_id == event.tenant_id.value,
+                    HumanReviewRecord.agent_run_id == event.agent_run_id.value,
+                )
+            )
             await session.execute(
                 delete(InputPolicyAssessmentRecord).where(
                     InputPolicyAssessmentRecord.tenant_id == event.tenant_id.value,

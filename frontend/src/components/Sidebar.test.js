@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import Sidebar from './Sidebar';
 
-const renderSidebar = (canViewGovernance) =>
+const renderSidebar = (canViewGovernance, activeView = 'chat') =>
   renderToStaticMarkup(
     <Sidebar
       conversations={[]}
@@ -11,10 +11,11 @@ const renderSidebar = (canViewGovernance) =>
       onSelectConversation={() => {}}
       onNewConversation={() => {}}
       creatingConversation={false}
-      activeView="chat"
+      activeView={activeView}
       canViewGovernance={canViewGovernance}
       onShowChat={() => {}}
       onShowCompliance={() => {}}
+      onShowReviews={() => {}}
       user={{ name: 'Reviewer', tenant_id: 'tenant-a' }}
       onLogout={() => {}}
     />
@@ -22,10 +23,22 @@ const renderSidebar = (canViewGovernance) =>
 
 describe('Sidebar governance navigation', () => {
   test('shows Compliance to an authorized reviewer', () => {
-    expect(renderSidebar(true)).toContain('Compliance');
+    const markup = renderSidebar(true);
+
+    expect(markup).toContain('Compliance');
+    expect(markup).toContain('Review queue');
   });
 
   test('does not render Compliance for an ordinary user', () => {
-    expect(renderSidebar(false)).not.toContain('Compliance');
+    const markup = renderSidebar(false);
+
+    expect(markup).not.toContain('Compliance');
+    expect(markup).not.toContain('Review queue');
+  });
+
+  test('marks the review queue as the active workspace page', () => {
+    const markup = renderSidebar(true, 'reviews');
+
+    expect(markup).toMatch(/aria-current="page"[^>]*>.*Review queue/s);
   });
 });

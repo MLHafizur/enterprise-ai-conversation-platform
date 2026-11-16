@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { matchPath, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 
 import { getApiErrorMessage } from '../api';
@@ -15,6 +15,7 @@ import ChatInterface from './ChatInterface';
 import ComplianceDashboard from './ComplianceDashboard';
 import ConnectionStatus from './ConnectionStatus';
 import { canReadGovernance } from '../governance';
+import HumanReviewQueue from './HumanReviewQueue';
 import Sidebar from './Sidebar';
 import TenantInfo from './TenantInfo';
 
@@ -26,6 +27,13 @@ const Dashboard = () => {
   const dashboardPath = location.pathname.replace(/\/+$/, '') || '/';
   const isChatRoute = dashboardPath === '/dashboard';
   const isComplianceRoute = dashboardPath === '/dashboard/compliance';
+  const reviewDetailMatch = matchPath(
+    '/dashboard/reviews/:agentRunId',
+    dashboardPath
+  );
+  const isReviewsRoute =
+    dashboardPath === '/dashboard/reviews' || reviewDetailMatch !== null;
+  const selectedReviewId = reviewDetailMatch?.params.agentRunId || null;
   const canViewGovernance = canReadGovernance(user?.roles);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [conversations, setConversations] = useState([]);
@@ -117,13 +125,24 @@ const Dashboard = () => {
     await createNewConversation();
   }, [createNewConversation, navigate]);
 
-  if (!isChatRoute && !isComplianceRoute) {
+  if (!isChatRoute && !isComplianceRoute && !isReviewsRoute) {
     return <Navigate to="/dashboard" replace />;
   }
 
-  if (isComplianceRoute && !canViewGovernance) {
+  if ((isComplianceRoute || isReviewsRoute) && !canViewGovernance) {
     return <Navigate to="/dashboard" replace />;
   }
+
+  const activeView = isComplianceRoute
+    ? 'compliance'
+    : isReviewsRoute
+      ? 'reviews'
+      : 'chat';
+  const pageTitle = isComplianceRoute
+    ? 'Governance Console'
+    : isReviewsRoute
+      ? 'Human Review'
+      : 'Enterprise Chat Agent';
 
   return (
     <div className="flex h-screen min-w-[900px] bg-gray-100">
@@ -133,10 +152,11 @@ const Dashboard = () => {
         onSelectConversation={selectConversation}
         onNewConversation={createAndShowConversation}
         creatingConversation={creatingConversation}
-        activeView={isComplianceRoute ? 'compliance' : 'chat'}
+        activeView={activeView}
         canViewGovernance={canViewGovernance}
         onShowChat={() => navigate('/dashboard')}
         onShowCompliance={() => navigate('/dashboard/compliance')}
+        onShowReviews={() => navigate('/dashboard/reviews')}
         user={user}
         onLogout={logout}
       />
@@ -146,9 +166,9 @@ const Dashboard = () => {
           <div className="flex items-center justify-between px-6 py-4">
             <div className="flex items-center space-x-4">
               <h1 className="text-xl font-semibold text-gray-900">
-                {isComplianceRoute ? 'Governance Console' : 'Enterprise Chat Agent'}
+                {pageTitle}
               </h1>
-              {!isComplianceRoute && (
+              {isChatRoute && (
                 <ConnectionStatus
                   status={connectionStatus}
                   activeConnections={activeConnections}
@@ -162,6 +182,17 @@ const Dashboard = () => {
         <main className="flex-1 overflow-hidden">
           {isComplianceRoute ? (
             <ComplianceDashboard />
+          ) : isReviewsRoute ? (
+            <HumanReviewQueue
+              selectedAgentRunId={selectedReviewId}
+              onSelectReview={(agentRunId) =>
+                navigate(
+                  agentRunId
+                    ? `/dashboard/reviews/${encodeURIComponent(agentRunId)}`
+                    : '/dashboard/reviews'
+                )
+              }
+            />
           ) : loadingConversations ? (
             <div className="h-full flex items-center justify-center bg-gray-50">
               <div

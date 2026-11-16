@@ -61,6 +61,9 @@ from enterprise_chat_platform.infrastructure.persistence.models.outbox_event imp
 from enterprise_chat_platform.infrastructure.persistence.repositories.conversation import (
     SqlAlchemyConversationRepository,
 )
+from enterprise_chat_platform.infrastructure.persistence.repositories.human_review import (
+    SqlAlchemyHumanReviewRepository,
+)
 from enterprise_chat_platform.infrastructure.persistence.repositories.input_policy_assessment import (
     SqlAlchemyInputPolicyAssessmentRepository,
 )
@@ -279,6 +282,14 @@ class SqlAlchemyAgentRunJobStore:
                     # Do not clear the lease or publish the queued event: the
                     # caller still owns the provider-call phase of this job.
                     return stored_assessment
+
+                if stored_assessment.action is PolicyAction.ESCALATE:
+                    human_review_repository = SqlAlchemyHumanReviewRepository(session)
+                    await human_review_repository.insert_pending_or_get(
+                        tenant_id=job.tenant_id,
+                        agent_run_id=job.agent_run_id,
+                        created_at=assessment_time,
+                    )
 
                 failure = _INPUT_POLICY_FAILURES[stored_assessment.action]
                 effective_time = max(
