@@ -12,6 +12,9 @@ from enterprise_chat_platform.infrastructure.persistence.models.conversation imp
 from enterprise_chat_platform.infrastructure.persistence.models.idempotency_receipt import (
     IdempotencyReceiptRecord,
 )
+from enterprise_chat_platform.infrastructure.persistence.models.input_policy_assessment import (
+    InputPolicyAssessmentRecord,
+)
 from enterprise_chat_platform.infrastructure.persistence.models.message import (
     MessageRecord,
 )
@@ -32,4 +35,5 @@ __all__ = [
     "MessageRecord",
     "OutboxEventRecord",
     "registered_model_metadata",
+    "InputPolicyAssessmentRecord",
 ]

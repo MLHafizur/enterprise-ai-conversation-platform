@@ -4,6 +4,7 @@ import pytest
 
 from enterprise_chat_platform.domain.errors import DomainValidationError
 from enterprise_chat_platform.domain.governance import (
+    MAX_POLICY_FINDINGS,
     PolicyAction,
     PolicyAssessment,
     PolicyFinding,
@@ -165,3 +166,25 @@ def test_assessment_is_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         setattr(assessment, "risk_score", 1.0)  # noqa: B010
+
+
+def test_assessment_rejects_too_many_findings() -> None:
+    findings = tuple(
+        PolicyFinding(
+            code=f"policy.finding_{index}",
+            severity=PolicySeverity.LOW,
+            safe_message="A bounded policy finding",
+        )
+        for index in range(MAX_POLICY_FINDINGS + 1)
+    )
+
+    with pytest.raises(
+        DomainValidationError,
+        match="cannot exceed",
+    ):
+        PolicyAssessment(
+            action=PolicyAction.ALLOW,
+            risk_score=0.1,
+            policy_version="conversation-input.v1",
+            findings=findings,
+        )

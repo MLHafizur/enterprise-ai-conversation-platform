@@ -12,6 +12,7 @@ from enterprise_chat_platform.domain.errors import DomainValidationError
 MAX_POLICY_CODE_LENGTH = 64
 MAX_POLICY_VERSION_LENGTH = 64
 MAX_SAFE_FINDING_MESSAGE_LENGTH = 256
+MAX_POLICY_FINDINGS = 32
 
 _POLICY_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 _POLICY_VERSION_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -105,7 +106,14 @@ class PolicyAssessment:
         ):
             raise DomainValidationError("Policy version is invalid")
 
-        normalized_findings = tuple(self.findings)
+        try:
+            normalized_findings = tuple(self.findings)
+        except TypeError:
+            raise DomainValidationError("Policy findings are invalid") from None
+        if len(normalized_findings) > MAX_POLICY_FINDINGS:
+            raise DomainValidationError(
+                f"Policy assessment cannot exceed {MAX_POLICY_FINDINGS} findings"
+            )
         if any(not isinstance(finding, PolicyFinding) for finding in normalized_findings):
             raise DomainValidationError("Policy findings are invalid")
 
