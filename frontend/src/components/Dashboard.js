@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 
 import { getApiErrorMessage } from '../api';
@@ -11,13 +12,21 @@ import {
 import { useAuth } from '../hooks/useAuth';
 import { useWebSocket } from '../hooks/useWebSocket';
 import ChatInterface from './ChatInterface';
+import ComplianceDashboard from './ComplianceDashboard';
 import ConnectionStatus from './ConnectionStatus';
+import { canReadGovernance } from '../governance';
 import Sidebar from './Sidebar';
 import TenantInfo from './TenantInfo';
 
 const Dashboard = () => {
   const { user, logout } = useAuth();
   const { connectionStatus, activeConnections } = useWebSocket();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const dashboardPath = location.pathname.replace(/\/+$/, '') || '/';
+  const isChatRoute = dashboardPath === '/dashboard';
+  const isComplianceRoute = dashboardPath === '/dashboard/compliance';
+  const canViewGovernance = canReadGovernance(user?.roles);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
@@ -87,20 +96,34 @@ const Dashboard = () => {
   }, [refreshConversation]);
 
   useEffect(() => {
-    if (initializedRef.current) {
+    if (!isChatRoute || initializedRef.current) {
       return;
     }
     initializedRef.current = true;
     createNewConversation();
-  }, [createNewConversation]);
+  }, [createNewConversation, isChatRoute]);
 
   const selectConversation = useCallback(
     async (conversationId) => {
+      navigate('/dashboard');
       setSelectedConversation(conversationId);
       await refreshConversation(conversationId);
     },
-    [refreshConversation]
+    [navigate, refreshConversation]
   );
+
+  const createAndShowConversation = useCallback(async () => {
+    navigate('/dashboard');
+    await createNewConversation();
+  }, [createNewConversation, navigate]);
+
+  if (!isChatRoute && !isComplianceRoute) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  if (isComplianceRoute && !canViewGovernance) {
+    return <Navigate to="/dashboard" replace />;
+  }
 
   return (
     <div className="flex h-screen min-w-[900px] bg-gray-100">
@@ -108,8 +131,12 @@ const Dashboard = () => {
         conversations={conversations}
         selectedConversation={selectedConversation}
         onSelectConversation={selectConversation}
-        onNewConversation={createNewConversation}
+        onNewConversation={createAndShowConversation}
         creatingConversation={creatingConversation}
+        activeView={isComplianceRoute ? 'compliance' : 'chat'}
+        canViewGovernance={canViewGovernance}
+        onShowChat={() => navigate('/dashboard')}
+        onShowCompliance={() => navigate('/dashboard/compliance')}
         user={user}
         onLogout={logout}
       />
@@ -119,19 +146,23 @@ const Dashboard = () => {
           <div className="flex items-center justify-between px-6 py-4">
             <div className="flex items-center space-x-4">
               <h1 className="text-xl font-semibold text-gray-900">
-                Enterprise Chat Agent
+                {isComplianceRoute ? 'Governance Console' : 'Enterprise Chat Agent'}
               </h1>
-              <ConnectionStatus
-                status={connectionStatus}
-                activeConnections={activeConnections}
-              />
+              {!isComplianceRoute && (
+                <ConnectionStatus
+                  status={connectionStatus}
+                  activeConnections={activeConnections}
+                />
+              )}
             </div>
             <TenantInfo user={user} />
           </div>
         </header>
 
         <main className="flex-1 overflow-hidden">
-          {loadingConversations ? (
+          {isComplianceRoute ? (
+            <ComplianceDashboard />
+          ) : loadingConversations ? (
             <div className="h-full flex items-center justify-center bg-gray-50">
               <div
                 className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"

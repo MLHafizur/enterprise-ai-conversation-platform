@@ -1,8 +1,10 @@
 import React from 'react';
 import {
   ArrowRightOnRectangleIcon,
+  ChatBubbleLeftRightIcon,
   ChatBubbleLeftIcon,
   PlusIcon,
+  ShieldCheckIcon,
   UserCircleIcon
 } from '@heroicons/react/24/outline';
 import { format } from 'date-fns';
@@ -18,10 +20,45 @@ const Sidebar = ({
   onSelectConversation,
   onNewConversation,
   creatingConversation,
+  activeView,
+  canViewGovernance,
+  onShowChat,
+  onShowCompliance,
   user,
   onLogout
 }) => (
   <aside className="w-80 bg-white border-r border-gray-200 flex flex-col">
+    <nav className="p-4 border-b border-gray-200 space-y-1" aria-label="Workspace">
+      <button
+        type="button"
+        onClick={onShowChat}
+        aria-current={activeView === 'chat' ? 'page' : undefined}
+        className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+          activeView === 'chat'
+            ? 'bg-indigo-50 text-indigo-700'
+            : 'text-gray-700 hover:bg-gray-50'
+        }`}
+      >
+        <ChatBubbleLeftRightIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+        Chat
+      </button>
+      {canViewGovernance && (
+        <button
+          type="button"
+          onClick={onShowCompliance}
+          aria-current={activeView === 'compliance' ? 'page' : undefined}
+          className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+            activeView === 'compliance'
+              ? 'bg-indigo-50 text-indigo-700'
+              : 'text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <ShieldCheckIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+          Compliance
+        </button>
+      )}
+    </nav>
+
     <div className="p-4 border-b border-gray-200">
       <button
         type="button"
