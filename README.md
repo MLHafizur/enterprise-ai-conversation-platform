@@ -89,6 +89,13 @@ The full component and event-flow explanation is in
 business invariants are in
 [docs/architecture/chat-domain.md](docs/architecture/chat-domain.md).
 
+Reusable learning references:
+
+- [Enterprise AI Platform Cheatsheet](docs/learning/enterprise-ai-platform-cheatsheet.md)
+  collects the build order, patterns, commands, tests, and failure playbooks.
+- [Staff and Principal Engineer Interview Guide](docs/learning/staff-principal-interview-guide.md)
+  turns this project into system-design, technical, and leadership study material.
+
 ## One message from start to finish
 
 1. The browser creates a conversation and sends a message with a new
