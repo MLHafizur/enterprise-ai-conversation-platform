@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import tempfile
 import time
 from collections.abc import Iterable
@@ -361,26 +362,33 @@ class BoundedGitRepositoryScanner:
         for relative_path, path in paths:
             if deadline is not None and time.monotonic() >= deadline:
                 raise RepositoryScanError("Repository analysis timed out")
+            try:
+                file_stat = path.stat(follow_symlinks=False)
+            except OSError:
+                raise RepositoryScanError("Repository source file could not be inspected") from None
+            if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+                continue
             if files_analyzed >= self._limits.max_files:
                 raise RepositoryScanError("Repository exceeds the configured file limit")
-            try:
-                stat = path.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or stat.st_size > self._limits.max_file_size_bytes
-            ):
-                continue
-            if bytes_analyzed + stat.st_size > self._limits.max_repository_bytes:
+            if file_stat.st_size > self._limits.max_file_size_bytes:
+                raise RepositoryScanError(
+                    "Repository source file exceeds the configured file size limit"
+                )
+            if bytes_analyzed + file_stat.st_size > self._limits.max_repository_bytes:
                 raise RepositoryScanError("Repository exceeds the configured byte limit")
             try:
                 raw_content = path.read_bytes()
+            except OSError:
+                raise RepositoryScanError("Repository source file could not be read") from None
+            try:
                 content = raw_content.decode("utf-8", errors="strict")
-            except (OSError, UnicodeDecodeError):
-                continue
-            if "\x00" in content or not content:
+            except UnicodeDecodeError:
+                raise RepositoryScanError("Repository source file is not valid UTF-8") from None
+            if "\x00" in content:
+                raise RepositoryScanError("Repository source file contains binary content")
+            files_analyzed += 1
+            bytes_analyzed += len(raw_content)
+            if not content:
                 continue
 
             file_findings = self._engine.analyze_code(content, relative_path)
@@ -389,8 +397,6 @@ class BoundedGitRepositoryScanner:
             findings.extend(file_findings)
             if len(findings) > self._limits.max_findings:
                 raise RepositoryScanError("Repository exceeds the configured finding limit")
-            files_analyzed += 1
-            bytes_analyzed += len(raw_content)
 
         return RepositoryScanResult(
             commit_sha=commit_sha,
@@ -406,7 +412,7 @@ class BoundedGitRepositoryScanner:
         relative_paths: tuple[str, ...] | None,
     ) -> Iterable[tuple[str, Path]]:
         if relative_paths is None:
-            raw_paths = (path for path in root.rglob("*") if path.is_file())
+            raw_paths = root.rglob("*")
         else:
             raw_paths = (root / relative_path for relative_path in relative_paths)
 
@@ -421,15 +427,22 @@ class BoundedGitRepositoryScanner:
             if path.suffix.lower() not in SUPPORTED_SOURCE_SUFFIXES:
                 continue
             # ``resolve(strict=False)`` would follow symlinks, so reject them first.
-            if path.is_symlink():
-                continue
+            try:
+                if path.is_symlink():
+                    continue
+            except OSError:
+                raise RepositoryScanError("Repository source file could not be inspected") from None
             try:
                 resolved = path.resolve(strict=True)
             except OSError:
-                continue
+                raise RepositoryScanError("Repository source file could not be inspected") from None
             if not resolved.is_relative_to(root_resolved):
                 continue
             relative_name = relative.as_posix()
-            if not relative_name or len(relative_name) > 512:
+            if not relative_name:
                 continue
+            if len(relative_name) > 512:
+                raise RepositoryScanError(
+                    "Repository source file path exceeds the configured length limit"
+                )
             yield relative_name, path

@@ -22,6 +22,7 @@ import {
   reviewSecurityScan,
   suggestSecurityFix
 } from '../codeSecurity';
+import SafeCodeSnippet from './SafeCodeSnippet';
 import { SecurityBadge, formatBytes } from './SecurityPresentation';
 
 const EXAMPLE_CODE = `import os
@@ -160,7 +161,10 @@ const FindingCard = ({ finding }) => {
           <span>Redacted evidence</span>
           <span>Secrets never leave the scanner</span>
         </div>
-        <code className="block whitespace-pre-wrap break-all font-mono text-sm text-slate-100">{finding.redactedCodeSnippet}</code>
+        <SafeCodeSnippet
+          code={finding.redactedCodeSnippet}
+          filePath={finding.filePath}
+        />
       </div>
 
       <div className="mt-4 rounded-lg border border-indigo-100 bg-indigo-50 p-4">

@@ -8,6 +8,7 @@ import {
   explainSecurityFinding,
   fetchSecurityDashboard,
   fetchSecurityRules,
+  fetchSecurityScans,
   generateSecurityReport,
   normalizeSecurityDashboard,
   normalizeSecurityScan,
@@ -245,6 +246,26 @@ describe('code security API adapter', () => {
       rules: [{ owaspCategory: 'A03:2021' }]
     });
     expect(api.get).toHaveBeenCalledWith('/v1/security/rules');
+  });
+
+  test('loads an explicit bounded window of recent scan activity', async () => {
+    api.get.mockResolvedValue({
+      data: { scans: [scan({ includeFindings: false })] }
+    });
+
+    await expect(fetchSecurityScans({ limit: 100 })).resolves.toMatchObject([
+      { id: scanId, repositoryId }
+    ]);
+    expect(api.get).toHaveBeenCalledWith('/v1/security/scans', {
+      params: { limit: 100 }
+    });
+  });
+
+  test('rejects an invalid recent scan activity limit before making a request', async () => {
+    await expect(fetchSecurityScans({ limit: 101 })).rejects.toThrow(
+      'Scan activity limit is invalid'
+    );
+    expect(api.get).not.toHaveBeenCalled();
   });
 
   test('submits snippets with a safe source label and no client identity', async () => {

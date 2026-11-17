@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -325,8 +326,15 @@ class _Store:
 
 
 class _ReviewStatusPublisher:
-    def __init__(self, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        delay_seconds: float = 0,
+    ) -> None:
         self.error = error
+        self.delay_seconds = delay_seconds
+        self.cancelled = False
         self.calls: list[dict[str, object]] = []
 
     async def publish_review_decision(
@@ -343,6 +351,12 @@ class _ReviewStatusPublisher:
                 "decision": decision,
             }
         )
+        if self.delay_seconds:
+            try:
+                await asyncio.sleep(self.delay_seconds)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
         if self.error is not None:
             raise self.error
 
@@ -673,6 +687,37 @@ def test_admin_records_one_review_only_for_review_required_scan() -> None:
     ]
 
 
+def test_webhook_scan_review_publishes_final_github_status() -> None:
+    store = _Store()
+    publisher = _ReviewStatusPublisher()
+    store.scan = replace_scan(
+        store.scan,
+        source=CodeScanSource.WEBHOOK.value,
+        gate_decision=GateDecision.REVIEW_REQUIRED.value,
+    )
+
+    with TestClient(
+        _application(
+            roles=("admin",),
+            store=store,
+            review_status_publisher=publisher,
+        )
+    ) as client:
+        response = client.post(
+            f"/v1/security/scans/{SCAN_ID}/reviews",
+            json={"decision": "approved", "safe_note": "Webhook finding reviewed"},
+        )
+
+    assert response.status_code == 201
+    assert publisher.calls == [
+        {
+            "clone_url": "https://github.com/example/secure-service.git",
+            "commit_sha": "a" * 40,
+            "decision": SecurityReviewDecision.APPROVED,
+        }
+    ]
+
+
 def test_review_remains_committed_when_github_status_delivery_fails(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -707,6 +752,38 @@ def test_review_remains_committed_when_github_status_delivery_fails(
     ]
     assert len(matching) == 1
     assert matching[0].notification_channel == "github"  # type: ignore[attr-defined]
+
+
+def test_review_response_bounds_slow_github_status_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "enterprise_chat_platform.api.code_security._REVIEW_STATUS_PUBLISH_TIMEOUT_SECONDS",
+        0.01,
+    )
+    store = _Store()
+    store.scan = replace_scan(
+        store.scan,
+        gate_decision=GateDecision.REVIEW_REQUIRED.value,
+    )
+    publisher = _ReviewStatusPublisher(delay_seconds=60)
+
+    with TestClient(
+        _application(
+            roles=("admin",),
+            store=store,
+            review_status_publisher=publisher,
+        )
+    ) as client:
+        response = client.post(
+            f"/v1/security/scans/{SCAN_ID}/reviews",
+            json={"decision": "blocked", "safe_note": "Manual review completed"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["decision"] == "blocked"
+    assert store.review is not None
+    assert publisher.cancelled is True
 
 
 def test_dashboard_matches_frontend_contract() -> None:

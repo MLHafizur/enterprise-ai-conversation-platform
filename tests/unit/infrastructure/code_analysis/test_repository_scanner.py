@@ -64,6 +64,126 @@ def test_local_scan_rejects_repository_byte_overflow(tmp_path: Path) -> None:
         )
 
 
+def test_local_scan_rejects_oversized_supported_source(tmp_path: Path) -> None:
+    (tmp_path / "oversized.py").write_text("a" * 65, encoding="utf-8")
+
+    with pytest.raises(RepositoryScanError, match="file size limit"):
+        _scanner(max_file_size_bytes=64, max_repository_bytes=128)._scan_paths_sync(  # noqa: SLF001
+            root=tmp_path,
+            relative_paths=None,
+            commit_sha="c" * 40,
+        )
+
+
+def test_local_scan_rejects_overlong_supported_source_path(tmp_path: Path) -> None:
+    parent = tmp_path
+    for index in range(5):
+        parent /= f"segment-{index}-" + ("a" * 96)
+    parent.mkdir(parents=True)
+    (parent / "vulnerable.py").write_text("eval(user_input)\n", encoding="utf-8")
+
+    with pytest.raises(RepositoryScanError, match="path exceeds"):
+        _scanner()._scan_paths_sync(  # noqa: SLF001 - path boundary test
+            root=tmp_path,
+            relative_paths=None,
+            commit_sha="2" * 40,
+        )
+
+
+def test_local_scan_counts_empty_supported_sources_as_inspected(tmp_path: Path) -> None:
+    (tmp_path / "empty.py").write_bytes(b"")
+    (tmp_path / "safe.js").write_text("const safe = true;\n", encoding="utf-8")
+
+    result = _scanner(max_files=2)._scan_paths_sync(  # noqa: SLF001 - file limit test
+        root=tmp_path,
+        relative_paths=None,
+        commit_sha="3" * 40,
+    )
+
+    assert result.files_analyzed == 2
+    assert result.bytes_analyzed == len(b"const safe = true;\n")
+
+
+def test_local_scan_rejects_empty_supported_sources_over_file_limit(tmp_path: Path) -> None:
+    for index in range(3):
+        (tmp_path / f"empty_{index}.py").write_bytes(b"")
+
+    with pytest.raises(RepositoryScanError, match="file limit"):
+        _scanner(max_files=2)._scan_paths_sync(  # noqa: SLF001 - file limit test
+            root=tmp_path,
+            relative_paths=None,
+            commit_sha="4" * 40,
+        )
+
+
+def test_local_scan_rejects_supported_source_stat_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "uninspectable.py"
+    source.write_text("print('safe')\n", encoding="utf-8")
+    original_stat = Path.stat
+
+    def failing_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path == source:
+            raise OSError("private filesystem detail")
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+
+    with pytest.raises(RepositoryScanError, match="could not be inspected"):
+        _scanner()._scan_paths_sync(  # noqa: SLF001 - failure boundary test
+            root=tmp_path,
+            relative_paths=None,
+            commit_sha="d" * 40,
+        )
+
+
+def test_local_scan_rejects_supported_source_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "unreadable.py"
+    source.write_text("print('safe')\n", encoding="utf-8")
+    original_read_bytes = Path.read_bytes
+
+    def failing_read(path: Path) -> bytes:
+        if path == source:
+            raise OSError("private filesystem detail")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read)
+
+    with pytest.raises(RepositoryScanError, match="could not be read"):
+        _scanner()._scan_paths_sync(  # noqa: SLF001 - failure boundary test
+            root=tmp_path,
+            relative_paths=None,
+            commit_sha="e" * 40,
+        )
+
+
+@pytest.mark.parametrize(
+    ("content", "safe_error"),
+    [
+        (b"\xff\xfe", "not valid UTF-8"),
+        (b"print('safe')\x00\n", "contains binary content"),
+    ],
+)
+def test_local_scan_rejects_non_text_supported_source(
+    tmp_path: Path,
+    content: bytes,
+    safe_error: str,
+) -> None:
+    (tmp_path / "non_text.py").write_bytes(content)
+
+    with pytest.raises(RepositoryScanError, match=safe_error):
+        _scanner()._scan_paths_sync(  # noqa: SLF001 - failure boundary test
+            root=tmp_path,
+            relative_paths=None,
+            commit_sha="f" * 40,
+        )
+
+
 def test_local_scan_skips_symlink_and_vendor_tree(tmp_path: Path) -> None:
     target = tmp_path / "target.py"
     target.write_text('password = "a-very-secret-value"\n', encoding="utf-8")
@@ -80,6 +200,21 @@ def test_local_scan_skips_symlink_and_vendor_tree(tmp_path: Path) -> None:
 
     assert result.files_analyzed == 1
     assert {finding.file_path for finding in result.findings} == {"target.py"}
+
+
+def test_diff_scan_excludes_path_outside_repository_boundary(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (tmp_path / "outside.py").write_text("eval(user_input)\n", encoding="utf-8")
+
+    result = _scanner()._scan_paths_sync(  # noqa: SLF001 - containment boundary test
+        root=repository,
+        relative_paths=("../outside.py",),
+        commit_sha="1" * 40,
+    )
+
+    assert result.files_analyzed == 0
+    assert result.findings == ()
 
 
 @pytest.mark.asyncio

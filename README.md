@@ -296,7 +296,9 @@ The six rules cover dynamic SQL (CWE-89), unsafe HTML assignment (CWE-79),
 path traversal (CWE-22), hardcoded secrets (CWE-798), dynamic `eval`/`exec`
 (CWE-95), and command injection (CWE-78). Python gets AST plus pattern
 analysis; supported non-Python files use versioned patterns. The scanner never
-imports or executes submitted code.
+imports or executes submitted code. During repository scans, a supported
+source file that is oversized, unreadable, binary, or non-UTF-8 fails the scan
+closed instead of disappearing from the result.
 
 `agent` and `admin` roles can read results and run scans. Only `admin` can
 register repositories, change tenant security settings, or record the one
@@ -328,8 +330,26 @@ After `./scripts/start-local.sh`, run the bounded end-to-end teaching demo:
 ```
 
 It obtains a short-lived local demo token without printing it, submits an
-intentionally vulnerable snippet, and prints only the committed gate and safe
-finding metadata.
+intentionally vulnerable snippet, verifies hardcoded-secret, SQL-injection,
+command-injection, and dynamic-execution findings, then prints only the
+committed gate and safe finding metadata.
+
+### Intentional Day 10 integration choices
+
+The production-oriented implementation makes three deliberate adaptations
+from the lesson prototype:
+
+- GitHub receives a machine-enforceable `enterprise/security-gate` **commit
+  status**. The project does not claim to post a pull-request comment or Check
+  Run. A verified-webhook scan with a repository and commit SHA receives the
+  same bounded best-effort final status after an immutable human review.
+- `SecurityEmailSender` is an application port for a deployment-owned email
+  adapter. The local Compose stack has no SMTP service and sends no email.
+- GitHub, Slack, Gemini, and webhook credentials stay in server-side settings;
+  the browser never accepts or returns integration secrets.
+
+These choices keep the deterministic gate authoritative and avoid presenting
+an unconfigured output channel as if it were delivered.
 
 ## Demo login is not production SSO
 
@@ -431,6 +451,16 @@ CI=true npm --prefix frontend test -- --watchAll=false --runInBand
 CI=true npm --prefix frontend run build
 ```
 
+Run the focused Day 10 backend and frontend suites with coverage reports:
+
+```bash
+./scripts/test-day10.sh
+```
+
+The script proves the five-concurrent-request ASGI boundary without external
+services and writes browsable reports to `htmlcov/day10/` and
+`frontend/coverage/`. It does not replace the PostgreSQL integration suite.
+
 The real PostgreSQL integration suite mutates the schema, and a migration test
 temporarily migrates backward. Run it only against the disposable local
 Compose database, preferably before creating manual Day 9 or Day 10 data. Stop
@@ -486,8 +516,10 @@ migrations, PostgreSQL constraints, concurrency, and worker transactions.
 ├── frontend/                     # React dashboard and browser tests
 ├── migrations/                   # ordered Alembic schema changes
 ├── scripts/
+│   ├── demo-code-security.sh     # authenticated Day 10 smoke + rule assertions
 │   ├── start-local.sh            # generate local secrets, build, and wait
-│   └── stop-local.sh             # safe stop; optional destructive reset
+│   ├── stop-local.sh             # safe stop; optional destructive reset
+│   └── test-day10.sh             # focused backend/frontend coverage runner
 ├── docs/
 │   ├── architecture/full-stack.md
 │   ├── architecture/chat-domain.md

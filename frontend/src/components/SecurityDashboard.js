@@ -136,7 +136,7 @@ const TrendOverview = ({ trend }) => (
       Finding trend
     </h2>
     <p className="mt-1 text-sm text-gray-500">
-      Daily severity totals from durable scan history.
+      Daily severity totals from recent durable scan activity.
     </p>
     {trend.length === 0 ? (
       <p className="mt-8 text-center text-sm text-gray-500">No trend data yet.</p>

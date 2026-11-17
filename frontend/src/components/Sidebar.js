@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   ArrowRightOnRectangleIcon,
   ChatBubbleLeftRightIcon,
@@ -10,7 +10,8 @@ import {
   PlusIcon,
   ShieldCheckIcon,
   SparklesIcon,
-  UserCircleIcon
+  UserCircleIcon,
+  XMarkIcon
 } from '@heroicons/react/24/outline';
 import { format } from 'date-fns';
 
@@ -19,7 +20,7 @@ const formatConversationDate = (value) => {
   return Number.isNaN(date.getTime()) ? '' : format(date, 'MMM d, yyyy');
 };
 
-const Sidebar = ({
+const SidebarContent = ({
   conversations,
   selectedConversation,
   onSelectConversation,
@@ -38,13 +39,20 @@ const Sidebar = ({
   onShowSecurityRepositories,
   onShowSecuritySettings,
   user,
-  onLogout
-}) => (
-  <aside className="w-80 bg-white border-r border-gray-200 flex flex-col">
+  onLogout,
+  onNavigate = () => {}
+}) => {
+  const handleNavigation = (action) => {
+    action();
+    onNavigate();
+  };
+
+  return (
+  <div className="flex min-h-0 flex-1 flex-col">
     <nav className="p-4 border-b border-gray-200 space-y-1" aria-label="Workspace">
       <button
         type="button"
-        onClick={onShowChat}
+        onClick={() => handleNavigation(onShowChat)}
         aria-current={activeView === 'chat' ? 'page' : undefined}
         className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
           activeView === 'chat'
@@ -59,7 +67,7 @@ const Sidebar = ({
         <>
           <button
             type="button"
-            onClick={onShowCompliance}
+            onClick={() => handleNavigation(onShowCompliance)}
             aria-current={activeView === 'compliance' ? 'page' : undefined}
             className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
               activeView === 'compliance'
@@ -72,7 +80,7 @@ const Sidebar = ({
           </button>
           <button
             type="button"
-            onClick={onShowReviews}
+            onClick={() => handleNavigation(onShowReviews)}
             aria-current={activeView === 'reviews' ? 'page' : undefined}
             className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
               activeView === 'reviews'
@@ -91,7 +99,7 @@ const Sidebar = ({
       {canManageProfiles && (
         <button
           type="button"
-          onClick={onShowProfiles}
+          onClick={() => handleNavigation(onShowProfiles)}
           aria-current={activeView === 'profiles' ? 'page' : undefined}
           className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
             activeView === 'profiles'
@@ -110,7 +118,7 @@ const Sidebar = ({
           </div>
           <button
             type="button"
-            onClick={onShowSecurityDashboard}
+            onClick={() => handleNavigation(onShowSecurityDashboard)}
             aria-current={activeView === 'security' ? 'page' : undefined}
             className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
               activeView === 'security'
@@ -123,7 +131,7 @@ const Sidebar = ({
           </button>
           <button
             type="button"
-            onClick={onShowCodeAnalysis}
+            onClick={() => handleNavigation(onShowCodeAnalysis)}
             aria-current={activeView === 'security-analysis' ? 'page' : undefined}
             className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
               activeView === 'security-analysis'
@@ -136,7 +144,7 @@ const Sidebar = ({
           </button>
           <button
             type="button"
-            onClick={onShowSecurityRepositories}
+            onClick={() => handleNavigation(onShowSecurityRepositories)}
             aria-current={activeView === 'security-repositories' ? 'page' : undefined}
             className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
               activeView === 'security-repositories'
@@ -149,7 +157,7 @@ const Sidebar = ({
           </button>
           <button
             type="button"
-            onClick={onShowSecuritySettings}
+            onClick={() => handleNavigation(onShowSecuritySettings)}
             aria-current={activeView === 'security-settings' ? 'page' : undefined}
             className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
               activeView === 'security-settings'
@@ -167,7 +175,7 @@ const Sidebar = ({
     <div className="p-4 border-b border-gray-200">
       <button
         type="button"
-        onClick={onNewConversation}
+        onClick={() => handleNavigation(onNewConversation)}
         disabled={creatingConversation}
         className="w-full flex items-center justify-center px-4 py-2 border border-gray-300 rounded-md shadow-sm bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
       >
@@ -184,7 +192,9 @@ const Sidebar = ({
             <button
               type="button"
               key={conversation.id}
-              onClick={() => onSelectConversation(conversation.id)}
+              onClick={() =>
+                handleNavigation(() => onSelectConversation(conversation.id))
+              }
               className={`w-full text-left p-3 rounded-lg transition-colors ${
                 selectedConversation === conversation.id
                   ? 'bg-indigo-50 border border-indigo-200'
@@ -227,7 +237,7 @@ const Sidebar = ({
         </div>
         <button
           type="button"
-          onClick={onLogout}
+          onClick={() => handleNavigation(onLogout)}
           aria-label="Sign out"
           className="p-1 text-gray-400 hover:text-gray-500"
         >
@@ -235,7 +245,131 @@ const Sidebar = ({
         </button>
       </div>
     </div>
-  </aside>
-);
+  </div>
+  );
+};
+
+const focusableElements = (container) =>
+  Array.from(
+    container?.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    ) || []
+  );
+
+const Sidebar = ({
+  mobileOpen = false,
+  onMobileClose = () => {},
+  ...contentProps
+}) => {
+  const drawerRef = useRef(null);
+  const closeButtonRef = useRef(null);
+
+  useEffect(() => {
+    if (!mobileOpen) return undefined;
+
+    const previouslyFocused = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    const desktopBreakpoint =
+      typeof window.matchMedia === 'function'
+        ? window.matchMedia('(min-width: 1024px)')
+        : null;
+    document.body.style.overflow = 'hidden';
+    closeButtonRef.current?.focus();
+
+    const handleBreakpointChange = (event) => {
+      if (event.matches) onMobileClose();
+    };
+
+    if (desktopBreakpoint) {
+      if (typeof desktopBreakpoint.addEventListener === 'function') {
+        desktopBreakpoint.addEventListener('change', handleBreakpointChange);
+      } else {
+        desktopBreakpoint.addListener?.(handleBreakpointChange);
+      }
+      if (desktopBreakpoint.matches) onMobileClose();
+    }
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onMobileClose();
+        return;
+      }
+
+      if (event.key !== 'Tab') return;
+      const elements = focusableElements(drawerRef.current);
+      if (elements.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (typeof desktopBreakpoint?.removeEventListener === 'function') {
+        desktopBreakpoint.removeEventListener('change', handleBreakpointChange);
+      } else {
+        desktopBreakpoint?.removeListener?.(handleBreakpointChange);
+      }
+      document.body.style.overflow = previousOverflow;
+      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
+    };
+  }, [mobileOpen, onMobileClose]);
+
+  return (
+    <>
+      <aside
+        aria-label="Primary workspace navigation"
+        className="hidden w-80 shrink-0 flex-col border-r border-gray-200 bg-white lg:flex"
+      >
+        <SidebarContent {...contentProps} />
+      </aside>
+
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <button
+            aria-label="Close navigation overlay"
+            className="absolute inset-0 cursor-default bg-slate-950/50"
+            onClick={onMobileClose}
+            tabIndex="-1"
+            type="button"
+          />
+          <aside
+            aria-label="Mobile workspace navigation"
+            aria-modal="true"
+            className="absolute inset-y-0 left-0 flex w-80 max-w-[85vw] flex-col bg-white shadow-xl"
+            id="mobile-workspace-sidebar"
+            ref={drawerRef}
+            role="dialog"
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+              <h2 className="font-semibold text-gray-900">Workspace navigation</h2>
+              <button
+                aria-label="Close navigation"
+                className="rounded-md p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                onClick={onMobileClose}
+                ref={closeButtonRef}
+                type="button"
+              >
+                <XMarkIcon aria-hidden="true" className="h-5 w-5" />
+              </button>
+            </div>
+            <SidebarContent {...contentProps} onNavigate={onMobileClose} />
+          </aside>
+        </div>
+      )}
+    </>
+  );
+};
 
 export default Sidebar;

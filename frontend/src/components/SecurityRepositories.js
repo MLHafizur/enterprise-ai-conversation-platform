@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowPathIcon,
   ArrowsRightLeftIcon,
+  ChevronDownIcon,
   CodeBracketSquareIcon,
   FolderPlusIcon,
   PlayIcon,
@@ -24,17 +25,76 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { SecurityAnalysisResults } from './CodeSecurityAnalysis';
 import { SecurityBadge } from './SecurityPresentation';
 
-const latestScansByRepository = (scans) => {
-  const latest = new Map();
+const scansByRepository = (scans) => {
+  const grouped = new Map();
   scans.forEach((scan) => {
     if (!scan.repositoryId) return;
-    const current = latest.get(scan.repositoryId);
-    if (!current || new Date(scan.createdAt) > new Date(current.createdAt)) {
-      latest.set(scan.repositoryId, scan);
-    }
+    const repositoryScans = grouped.get(scan.repositoryId) || [];
+    repositoryScans.push(scan);
+    grouped.set(scan.repositoryId, repositoryScans);
   });
-  return latest;
+  grouped.forEach((repositoryScans) => {
+    repositoryScans.sort(
+      (left, right) => new Date(right.createdAt) - new Date(left.createdAt)
+    );
+  });
+  return grouped;
 };
+
+const scanReference = (scan) => {
+  if (scan.baseBranch && scan.headBranch) {
+    return `${scan.baseBranch} → ${scan.headBranch}`;
+  }
+  return scan.branch || scan.sourceLabel || 'Repository scan';
+};
+
+export const RepositoryRecentScanActivity = ({
+  activityId,
+  repository,
+  scans,
+  onOpenScan
+}) => (
+  <section
+    aria-label={`${repository.displayName} recent scan activity`}
+    className="mt-3 rounded-lg border border-gray-200 bg-white"
+    id={activityId}
+  >
+    <ol className="max-h-80 divide-y divide-gray-100 overflow-y-auto">
+      {scans.map((scan) => (
+        <li className="p-3" key={scan.id}>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-gray-900">
+                {scanReference(scan)}
+              </p>
+              <p className="mt-1 text-xs text-gray-500">
+                {format(new Date(scan.createdAt), 'MMM d, yyyy p')} ·{' '}
+                {scan.totalFindings} findings
+              </p>
+              <button
+                aria-label={`View scan from ${format(
+                  new Date(scan.createdAt),
+                  'MMM d, yyyy p'
+                )}`}
+                className="mt-2 text-xs font-semibold text-indigo-700 hover:text-indigo-900"
+                onClick={() => onOpenScan(scan.id)}
+                type="button"
+              >
+                View scan details
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <SecurityBadge value={scan.status} kind="status" />
+              {scan.gateDecision && (
+                <SecurityBadge value={scan.gateDecision} kind="gate" />
+              )}
+            </div>
+          </div>
+        </li>
+      ))}
+    </ol>
+  </section>
+);
 
 const AddRepositoryForm = ({ onCreated, onCancel }) => {
   const [displayName, setDisplayName] = useState('');
@@ -143,7 +203,17 @@ export const RepositorySecurityList = ({
   onQueued = () => {},
   onOpenScan = () => {}
 }) => {
-  const latestByRepository = useMemo(() => latestScansByRepository(scans), [scans]);
+  const groupedScans = useMemo(() => scansByRepository(scans), [scans]);
+  const [expandedRepositories, setExpandedRepositories] = useState(() => new Set());
+
+  const toggleHistory = (repositoryId) => {
+    setExpandedRepositories((current) => {
+      const next = new Set(current);
+      if (next.has(repositoryId)) next.delete(repositoryId);
+      else next.add(repositoryId);
+      return next;
+    });
+  };
 
   if (repositories.length === 0) {
     return (
@@ -158,7 +228,10 @@ export const RepositorySecurityList = ({
   return (
     <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
       {repositories.map((repository) => {
-        const latestScan = latestByRepository.get(repository.id);
+        const repositoryScans = groupedScans.get(repository.id) || [];
+        const latestScan = repositoryScans[0];
+        const activityExpanded = expandedRepositories.has(repository.id);
+        const activityId = `repository-${repository.id}-recent-scan-activity`;
         return (
           <article key={repository.id} className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-4">
@@ -177,9 +250,34 @@ export const RepositorySecurityList = ({
                   <div className="flex items-center gap-2"><SecurityBadge value={latestScan.status} kind="status" />{latestScan.gateDecision && <SecurityBadge value={latestScan.gateDecision} kind="gate" />}</div>
                 </div>
               ) : (
-                <p className="text-sm text-gray-500">This repository has not been scanned yet.</p>
+                <p className="text-sm text-gray-500">No scans in the recent activity window.</p>
+              )}
+              {repositoryScans.length > 0 && (
+                <button
+                  aria-controls={activityId}
+                  aria-expanded={activityExpanded}
+                  className="mt-3 inline-flex items-center text-xs font-semibold text-gray-700 hover:text-indigo-800"
+                  onClick={() => toggleHistory(repository.id)}
+                  type="button"
+                >
+                  <ChevronDownIcon
+                    aria-hidden="true"
+                    className={`mr-1 h-4 w-4 transition-transform ${
+                      activityExpanded ? 'rotate-180' : ''
+                    }`}
+                  />
+                  {activityExpanded ? 'Hide' : 'Show'} recent scans ({repositoryScans.length})
+                </button>
               )}
             </div>
+            {activityExpanded && (
+              <RepositoryRecentScanActivity
+                activityId={activityId}
+                onOpenScan={onOpenScan}
+                repository={repository}
+                scans={repositoryScans}
+              />
+            )}
             {(canScan || canManage) && repository.enabled && <RepositoryActions repository={repository} onQueued={onQueued} />}
           </article>
         );
@@ -215,7 +313,7 @@ const SecurityRepositories = ({ canScan = false, canManage = false }) => {
     try {
       const [repositoryItems, scanItems] = await Promise.all([
         fetchCodeRepositories(),
-        fetchSecurityScans()
+        fetchSecurityScans({ limit: 100 })
       ]);
       setRepositories(repositoryItems);
       setScans(scanItems);

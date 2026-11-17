@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Bars3Icon } from '@heroicons/react/24/outline';
 import { matchPath, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 
@@ -65,6 +66,7 @@ const Dashboard = () => {
   const [conversations, setConversations] = useState([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [creatingConversation, setCreatingConversation] = useState(false);
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const creatingRef = useRef(false);
   const initializedRef = useRef(false);
 
@@ -151,6 +153,14 @@ const Dashboard = () => {
     await createNewConversation();
   }, [createNewConversation, navigate]);
 
+  const closeMobileNavigation = useCallback(() => {
+    setMobileNavigationOpen(false);
+  }, []);
+
+  useEffect(() => {
+    closeMobileNavigation();
+  }, [closeMobileNavigation, dashboardPath]);
+
   if (
     !isChatRoute &&
     !isComplianceRoute &&
@@ -199,7 +209,7 @@ const Dashboard = () => {
   }
 
   return (
-    <div className="flex h-screen min-w-[900px] bg-gray-100">
+    <div className="flex h-screen min-w-0 overflow-hidden bg-gray-100 supports-[height:100dvh]:h-[100dvh]">
       <Sidebar
         conversations={conversations}
         selectedConversation={selectedConversation}
@@ -222,15 +232,27 @@ const Dashboard = () => {
         onShowSecuritySettings={() =>
           navigate('/dashboard/security/settings')
         }
+        mobileOpen={mobileNavigationOpen}
+        onMobileClose={closeMobileNavigation}
         user={user}
         onLogout={logout}
       />
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex min-w-0 flex-1 flex-col">
         <header className="bg-white shadow-sm border-b border-gray-200">
-          <div className="flex items-center justify-between px-6 py-4">
-            <div className="flex items-center space-x-4">
-              <h1 className="text-xl font-semibold text-gray-900">
+          <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
+            <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+              <button
+                aria-controls="mobile-workspace-sidebar"
+                aria-expanded={mobileNavigationOpen}
+                aria-label="Open workspace navigation"
+                className="shrink-0 rounded-md p-2 text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 lg:hidden"
+                onClick={() => setMobileNavigationOpen(true)}
+                type="button"
+              >
+                <Bars3Icon aria-hidden="true" className="h-6 w-6" />
+              </button>
+              <h1 className="truncate text-lg font-semibold text-gray-900 sm:text-xl">
                 {pageTitle}
               </h1>
               {isChatRoute && (
@@ -240,7 +262,9 @@ const Dashboard = () => {
                 />
               )}
             </div>
-            <TenantInfo user={user} />
+            <div className="hidden shrink-0 sm:block">
+              <TenantInfo user={user} />
+            </div>
           </div>
         </header>
 

@@ -41,12 +41,26 @@ ACCESS_TOKEN="$(printf '%s' "${LOGIN_RESPONSE}" | UV_CACHE_DIR=/tmp/day10-demo-u
 SCAN_RESPONSE="$(curl --fail-with-body --silent --show-error \
   -H "Authorization: Bearer ${ACCESS_TOKEN}" \
   -H 'Content-Type: application/json' \
-  --data '{"source_label":"day10-demo.py","code":"password = \"hardcoded123\"\nquery = \"SELECT * FROM users WHERE id = \" + user_id\neval(user_input)"}' \
+  --data '{"source_label":"day10-demo.py","code":"import os\npassword = \"hardcoded123\"\nquery = \"SELECT * FROM users WHERE id = \" + user_id\ncursor.execute(query)\nos.system(\"ls \" + user_input)\neval(user_input)"}' \
   "${ORIGIN}/api/v1/security/scans/snippet")"
 
 printf '%s' "${SCAN_RESPONSE}" | UV_CACHE_DIR=/tmp/day10-demo-uv-cache uv run python -c '
 import json, sys
 scan = json.load(sys.stdin)
+expected = {
+    "command_injection",
+    "hardcoded_secret",
+    "sql_injection",
+    "unsafe_eval_exec",
+}
+actual = {finding["rule_id"] for finding in scan["findings"]}
+missing = expected - actual
+if scan["gate_decision"] != "block" or missing:
+    raise SystemExit(
+        "demo verification failed: gate={!r}, missing={!r}".format(
+            scan["gate_decision"], sorted(missing)
+        )
+    )
 print("Day 10 secure-code demo completed")
 print("scan: {}".format(scan["id"]))
 print("gate: {}".format(scan["gate_decision"]))

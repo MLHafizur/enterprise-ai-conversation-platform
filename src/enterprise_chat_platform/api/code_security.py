@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -107,6 +108,8 @@ router = APIRouter(
 )
 
 logger = logging.getLogger(__name__)
+
+_REVIEW_STATUS_PUBLISH_TIMEOUT_SECONDS = 2.0
 
 
 class _StrictModel(BaseModel):
@@ -888,11 +891,7 @@ async def review_scan(
     if detail.scan.gate_decision != GateDecision.REVIEW_REQUIRED.value:
         raise _conflict()
     repository = None
-    if (
-        detail.scan.source in {CodeScanSource.REPOSITORY.value, CodeScanSource.PULL_REQUEST.value}
-        and detail.scan.repository_id is not None
-        and detail.scan.commit_sha is not None
-    ):
+    if detail.scan.repository_id is not None and detail.scan.commit_sha is not None:
         repository = await store.get_repository(
             tenant_id=principal.actor.tenant_id,
             repository_id=CodeRepositoryId(detail.scan.repository_id),
@@ -917,10 +916,13 @@ async def review_scan(
         and detail.scan.commit_sha is not None
     ):
         try:
-            await status_publisher.publish_review_decision(
-                clone_url=repository.clone_url,
-                commit_sha=detail.scan.commit_sha,
-                decision=decision,
+            await asyncio.wait_for(
+                status_publisher.publish_review_decision(
+                    clone_url=repository.clone_url,
+                    commit_sha=detail.scan.commit_sha,
+                    decision=decision,
+                ),
+                timeout=_REVIEW_STATUS_PUBLISH_TIMEOUT_SECONDS,
             )
         except Exception:
             # The append-only review already committed. External status delivery

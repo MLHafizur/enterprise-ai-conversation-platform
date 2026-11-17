@@ -138,9 +138,13 @@ The repository scanner considers these suffixes:
 .c .cc .cpp .go .java .js .jsx .php .py .rb .ts .tsx
 ```
 
-It skips build output, virtual environments, caches, `node_modules`, `vendor`,
-`.git`, symlinks, binary/non-UTF-8 data, oversized files, and paths outside the
-temporary clone root. It never imports, compiles, or executes repository code.
+It ignores known build/dependency directories and files with unsupported
+suffixes. Once a path has a supported source suffix, however, an oversized,
+unreadable, binary, or non-UTF-8 file fails the repository scan closed; it is
+not silently omitted from an otherwise successful result. Symlinks and paths
+outside the temporary clone root remain explicitly excluded before their
+content is read. The scanner never imports, compiles, or executes repository
+code.
 
 ## How a finding is produced
 
@@ -177,9 +181,11 @@ A `review_required` scan may receive one immutable admin decision:
 `approved` or `blocked`, with an optional safe audit note. The review does not
 rewrite the original deterministic gate; it adds a separate auditable human
 decision. Scan detail returns that review after a reload, so the browser shows
-the recorded evidence instead of offering a duplicate decision. For a GitHub
-repository scan, the final review also replaces the pending commit status with
-`success` or `failure`; a status-delivery failure cannot roll back the review.
+the recorded evidence instead of offering a duplicate decision. For any
+GitHub-origin scan that retains a repository and commit SHA—including a scan
+queued by a verified webhook—the final review makes the same bounded,
+best-effort attempt to replace the pending commit status with `success` or
+`failure`. A status-delivery failure cannot roll back the durable review.
 
 ## Scan entry points
 
@@ -218,7 +224,10 @@ snippet endpoint, deterministic rules, persistence, and the gate in one step:
 ```
 
 The script never prints the bearer token or raw secret evidence. It is a local
-learning smoke test, not a production authentication or benchmarking tool.
+learning smoke test, not a production authentication or benchmarking tool. It
+fails unless the committed result is `block` and contains the expected
+hardcoded-secret, SQL-injection, command-injection, and dynamic-execution rule
+IDs.
 
 ### Snippet and file scans
 
@@ -653,6 +662,19 @@ CI=true npm --prefix frontend test -- --watchAll=false --runInBand
 CI=true npm --prefix frontend run build
 ```
 
+For one focused Day 10 coverage run after installing both dependency sets:
+
+```bash
+./scripts/test-day10.sh
+```
+
+This runs the isolated scanner, application, API, worker, realtime, and
+performance tests with Python branch coverage, then runs the Day 10 React
+tests with Jest coverage. Open `htmlcov/day10/index.html` for the backend and
+`frontend/coverage/lcov-report/index.html` for the browser report. Coverage is
+evidence about exercised code paths; it does not prove that every security
+condition is correct.
+
 Run the real PostgreSQL suite only against the disposable local database using
 the integration procedure in the main README. Stop `api`, `worker`,
 `security-worker`, and `relay` while schema-changing tests run.
@@ -679,6 +701,13 @@ machine or repository:
 | Repository scan | under 30 seconds for a representative bounded repository |
 | Security dashboard | under 1 second |
 | Direct concurrency | at least 5 simultaneous snippet requests |
+
+`tests/performance/test_code_security_http_performance.py` exercises five
+concurrent snippet requests through an in-memory ASGI transport. It includes
+FastAPI validation, authorization dependencies, orchestration, scanning, and
+response serialization while replacing PostgreSQL and external services with
+local test doubles. That makes the test repeatable; it is not a production
+load test.
 
 The default hard timeouts are 30 seconds for an individual Git operation and
 120 seconds for repository analysis. Repository latency naturally depends on

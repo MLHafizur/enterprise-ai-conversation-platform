@@ -643,8 +643,15 @@ export const fetchSecurityRules = async () => {
   return normalizeSecurityRules(response.data);
 };
 
-export const fetchSecurityScans = async () => {
-  const response = await api.get('/v1/security/scans');
+export const fetchSecurityScans = async ({ limit = 50 } = {}) => {
+  const boundedLimit = requireInteger(limit, {
+    minimum: 1,
+    maximum: 100,
+    errorFactory: () => invalidRequest('Scan activity limit is invalid')
+  });
+  const response = await api.get('/v1/security/scans', {
+    params: { limit: boundedLimit }
+  });
   return normalizeScanCollection(response.data);
 };
 
