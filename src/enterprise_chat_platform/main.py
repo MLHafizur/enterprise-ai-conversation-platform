@@ -4,6 +4,7 @@ from enterprise_chat_platform.api.assistant_profiles import (
     router as assistant_profiles_router,
 )
 from enterprise_chat_platform.api.auth import router as auth_router
+from enterprise_chat_platform.api.code_security import router as code_security_router
 from enterprise_chat_platform.api.conversations import router as conversations_router
 from enterprise_chat_platform.api.governance import router as governance_router
 from enterprise_chat_platform.api.health import router as health_router
@@ -65,6 +66,7 @@ def create_app(
     application.include_router(health_router)
     application.include_router(assistant_profiles_router)
     application.include_router(conversations_router)
+    application.include_router(code_security_router)
     application.include_router(turns_router)
     application.include_router(queries_router)
     application.include_router(policy_notices_router)

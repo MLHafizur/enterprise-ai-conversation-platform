@@ -6,11 +6,12 @@ shows how to accept a message quickly, process it safely in the background,
 notify the browser in real time, and still recover when a process or network
 connection fails.
 
-This repository is the standalone application built across Days 8 and 9 of
-the learning project. Day 8 establishes the reliable chat foundation. Day 9
-adds deterministic input governance, durable human review, bounded
-conversation context, tenant-specific assistant profiles, and compliance
-views without weakening the original transaction and tenant-safety rules.
+This repository is the standalone application built across Days 8, 9, and 10
+of the learning project. Day 8 establishes the reliable chat foundation. Day
+9 adds conversation governance, human review, bounded context, and
+tenant-specific assistants. Day 10 adds a tenant-safe secure-code-analysis
+bounded context without weakening the original transaction, identity, and
+tenant-safety rules.
 
 ## What is included
 
@@ -33,6 +34,15 @@ views without weakening the original transaction and tenant-safety rules.
 - Immutable tenant assistant-profile versions pinned to individual runs
 - Bounded conversation context and trusted, server-rendered provider prompts
 - Role-aware governance, review, and assistant-profile administration screens
+- Versioned AST and pattern source scanning with six deterministic CWE/OWASP
+  rules, stable fingerprints, deduplication, and redacted evidence
+- Direct snippet/file analysis plus queued repository, pull-request-diff, and
+  signed GitHub webhook scans
+- Tenant-configurable security gates, immutable reviews, advisory local/Gemini
+  explanations, and four role-aware security screens
+- Recoverable `security-worker`, content-free realtime scan events, and
+  optional GitHub commit-status and Slack outputs; final human review replaces
+  the pending GitHub gate without changing the deterministic scan result
 - Unit, frontend, contract, concurrency, migration, and PostgreSQL tests
 
 ## Architecture in plain language
@@ -50,6 +60,9 @@ Think of the system as a restaurant with a reliable paper trail:
   message but forgot to queue the job” failure.
 - The **worker** is the cook. It leases a queued ticket, calls Echo or Gemini
   outside the database transaction, then records the final result.
+- The **security worker** is the specialist inspector. It leases queued
+  repository work, performs a bounded HTTPS clone, runs deterministic rules,
+  and commits a gate result without executing repository code.
 - The **relay** is the mail carrier. It leases the durable terminal-notification
   row and rings Redis after the run finishes.
 - **Redis** is a doorbell, not the ledger. A missed ring never deletes the
@@ -67,7 +80,9 @@ flowchart LR
     API["FastAPI API + WebSocket"]
     DB[("PostgreSQL<br/>durable ledger + outbox")]
     Worker["Agent worker"]
+    SecurityWorker["Security worker"]
     Provider["Echo or Gemini"]
+    Scanner["AST + pattern scanner"]
     Relay["Notification relay"]
     Redis[("Redis<br/>doorbell + ephemeral quotas")]
 
@@ -77,6 +92,9 @@ flowchart LR
     Worker -->|lease queued work| DB
     Worker -->|bounded provider call| Provider
     Worker -->|assistant result + terminal outbox row| DB
+    SecurityWorker -->|lease queued repository scans| DB
+    SecurityWorker -->|bounded clone + deterministic analysis| Scanner
+    SecurityWorker -->|findings + gate| DB
     Relay -->|lease terminal notification| DB
     Relay -->|content-free publish| Redis
     Redis -->|tenant channel| API
@@ -88,6 +106,9 @@ The full component and event-flow explanation is in
 [docs/architecture/full-stack.md](docs/architecture/full-stack.md). The core
 business invariants are in
 [docs/architecture/chat-domain.md](docs/architecture/chat-domain.md).
+The complete Day 10 scanner, gate, API, UI, webhook, worker, and threat-model
+guide is in
+[docs/day10-secure-code-analysis.md](docs/day10-secure-code-analysis.md).
 
 Reusable learning references:
 
@@ -167,6 +188,8 @@ CHAT_JWT_ALGORITHM=HS256
 CHAT_JWT_KEY=replace-with-a-long-random-local-secret
 CHAT_REALTIME_ENABLED=true
 CHAT_PROVIDER_MODE=echo
+CHAT_CODE_SECURITY_ENABLED=true
+CHAT_CODE_SECURITY_AI_MODE=echo
 ```
 
 The expected services are:
@@ -178,6 +201,7 @@ The expected services are:
 | `migrate` | exited `0` | One-shot `alembic upgrade head` |
 | `api` | healthy | REST, JWT validation, and WebSockets |
 | `worker` | running | Provider work and durable result commits |
+| `security-worker` | running | Bounded repository/PR scans and security gates |
 | `relay` | running | PostgreSQL terminal outbox to Redis Pub/Sub |
 | `frontend` | healthy/running | React assets and same-origin gateway |
 
@@ -212,7 +236,7 @@ Replace `3000` with your configured `APP_PORT` when you changed the default.
 Follow the asynchronous path in the logs:
 
 ```bash
-docker compose logs --follow --tail=100 api worker relay
+docker compose logs --follow --tail=100 api worker security-worker relay
 ```
 
 Stop stateless services while preserving PostgreSQL data:
@@ -249,6 +273,64 @@ then open **Human Review** to resolve an escalated run. As an `admin`, open
 and activate it for future runs. Existing runs remain pinned to the profile
 version they originally received.
 
+## Explore the Day 10 secure-code-analysis features
+
+Sign in as a Support Agent or Administrator and use the four Security views:
+
+| View | What it demonstrates |
+|---|---|
+| **Security Dashboard** | Severity counts, seven-day trend, top rules, recent scans, and realtime refresh |
+| **Code Analysis** | Paste a snippet or upload a UTF-8 file; inspect redacted findings, CWE/OWASP mapping, recommendations, and advisory explanations |
+| **Repositories** | Register an allowlisted public HTTPS repository and queue a whole-branch or base/head diff scan |
+| **Security Settings** | Inspect tenant thresholds and limits; admins update them with optimistic revision checks |
+
+Try these small Python examples with the default `day10.v1` ruleset:
+
+| Code | Expected result with default thresholds | Why |
+|---|---|---|
+| `print("hello")` | `approve` | No configured finding |
+| `eval(user_input)` | `review_required` | High-severity dynamic execution, CWE-95 |
+| `API_TOKEN = "this-is-a-real-secret"` | `block` | Critical hardcoded credential, CWE-798 |
+
+The six rules cover dynamic SQL (CWE-89), unsafe HTML assignment (CWE-79),
+path traversal (CWE-22), hardcoded secrets (CWE-798), dynamic `eval`/`exec`
+(CWE-95), and command injection (CWE-78). Python gets AST plus pattern
+analysis; supported non-Python files use versioned patterns. The scanner never
+imports or executes submitted code.
+
+`agent` and `admin` roles can read results and run scans. Only `admin` can
+register repositories, change tenant security settings, or record the one
+immutable decision for a review-required scan. The normal `user` role cannot
+access code-security routes or screens.
+
+Direct snippet and file scans return a committed result synchronously.
+Repository, pull-request, and signed GitHub webhook scans return `202`, remain
+durable in PostgreSQL, and are handled by `security-worker` with leases,
+fencing, bounded retries, and backoff. A content-free
+`code_scan.status.v1` WebSocket event tells authorized browsers to refetch the
+authoritative REST result.
+
+The deterministic engine alone creates findings and gate decisions. Local
+Echo or Gemini may explain a redacted finding, suggest a fix, or generate a
+report, but AI cannot lower severity, approve code, or replace human review.
+Raw source and detected secret values are not persisted or sent to the
+explanation provider.
+
+For exact environment settings, API examples, HMAC webhook setup, CI usage,
+repository-clone controls, schema, performance targets, failure playbooks, and
+production hardening, read
+[Day 10: Secure Code Analysis](docs/day10-secure-code-analysis.md).
+
+After `./scripts/start-local.sh`, run the bounded end-to-end teaching demo:
+
+```bash
+./scripts/demo-code-security.sh
+```
+
+It obtains a short-lived local demo token without printing it, submits an
+intentionally vulnerable snippet, and prints only the committed gate and safe
+finding metadata.
+
 ## Demo login is not production SSO
 
 The bundled `/auth/login` route exists only to make the local dashboard easy
@@ -273,10 +355,12 @@ is a separate mode and is forbidden in staging and production.
 ## Optional Gemini provider
 
 Echo is the safe local default. To exercise the external provider boundary,
-set the worker to Gemini and inject the API key through local secrets:
+set chat and/or security explanations to Gemini and inject the API key through
+local secrets:
 
 ```dotenv
 CHAT_PROVIDER_MODE=gemini
+CHAT_CODE_SECURITY_AI_MODE=gemini
 CHAT_GEMINI_API_KEY=replace-locally
 CHAT_GEMINI_MODEL=gemini-2.5-flash
 ```
@@ -284,13 +368,15 @@ CHAT_GEMINI_MODEL=gemini-2.5-flash
 Then recreate the worker:
 
 ```bash
-docker compose up --build --detach worker
+docker compose up --build --detach worker security-worker api
 ```
 
-The Gemini adapter uses a bounded HTTP call, classifies timeouts, `408`, `429`,
-and `5xx` responses as transient, and returns only safe failure messages to the
-client. It never makes Redis or Gemini authoritative for chat history. External
-model usage can incur cost; keep Echo enabled when learning the architecture.
+The chat provider and code-security explanation mode are independent. The
+Gemini adapters use bounded HTTP calls and safe errors. Gemini never becomes
+authoritative for chat history, security findings, severity, or gate
+decisions. The security adapter receives redacted finding evidence rather than
+raw source. External model usage can incur cost; keep both modes on Echo while
+learning the architecture.
 
 ## Reliability and failure behavior
 
@@ -298,6 +384,10 @@ model usage can incur cost; keep Echo enabled when learning the architecture.
 |---|---|---|
 | API response is lost after commit | Exact retry with the same idempotency key returns the original IDs | No duplicate user turn |
 | Worker stops | Queued work stays in PostgreSQL; an expired lease can be reclaimed | Run remains pending until a worker returns |
+| Security worker stops | Queued repository scans stay in PostgreSQL; expired leases are reclaimable | Scan remains queued or running until a worker returns |
+| Repository clone or scan repeatedly fails | Security worker retries with bounded backoff, then commits a generic safe failure | Security screen shows failed without leaking Git stderr or source |
+| Gemini security explanation fails | Deterministic findings and gate remain unchanged | Advisory endpoint returns `503`; queued scans commit without the optional summary |
+| GitHub or Slack output fails | Durable scan remains authoritative; best-effort notifier does not roll it back | External status may be missing and needs operational follow-up |
 | Provider is temporarily unavailable | Worker releases the lease and retries with bounded backoff | UI waits and polls |
 | Provider exhausts attempts | Run becomes failed with a safe public message | Browser refetch shows terminal failure |
 | Relay or Redis stops | Terminal notification remains pending in PostgreSQL | WebSocket signal is delayed; REST polling still finds the result |
@@ -343,8 +433,9 @@ CI=true npm --prefix frontend run build
 
 The real PostgreSQL integration suite mutates the schema, and a migration test
 temporarily migrates backward. Run it only against the disposable local
-Compose database, preferably before creating manual Day 9 data. Stop the API,
-worker, and relay so they cannot use the database while the suite runs:
+Compose database, preferably before creating manual Day 9 or Day 10 data. Stop
+the API, chat worker, security worker, and relay so they cannot use the
+database while the suite runs:
 
 ```bash
 ./scripts/start-local.sh
@@ -400,18 +491,21 @@ migrations, PostgreSQL constraints, concurrency, and worker transactions.
 ├── docs/
 │   ├── architecture/full-stack.md
 │   ├── architecture/chat-domain.md
+│   ├── day10-secure-code-analysis.md
 │   └── operations.md
 ├── src/enterprise_chat_platform/
 │   ├── api/                      # auth, commands, queries, health, WebSocket
 │   ├── application/              # use cases and transport-independent ports
 │   ├── domain/                   # framework-independent business rules
 │   ├── infrastructure/
+│   │   ├── code_analysis/        # scanner, safe Git, webhooks, AI, outputs
 │   │   ├── persistence/          # models, UoWs, repositories, leased stores
 │   │   ├── realtime/             # Redis publisher/subscriber and connections
 │   │   ├── chat_provider.py      # local Echo adapter
 │   │   └── gemini_provider.py    # optional Gemini REST adapter
 │   ├── main.py                   # API composition
 │   ├── worker.py                 # `enterprise-chat-worker`
+│   ├── code_security_worker.py   # `enterprise-code-security-worker`
 │   └── relay.py                  # `enterprise-chat-relay`
 └── tests/
     ├── api/
@@ -432,15 +526,20 @@ and domain contracts; the domain does not import FastAPI, Redis, or SQLAlchemy.
   a migration approval pipeline.
 - Use authenticated/TLS Redis, memory limits, and a topology appropriate for
   disposable Pub/Sub and counters—not durable chat storage.
-- Keep API/worker/relay DB credentials DML-only and migrator credentials only
+- Keep API/workers/relay DB credentials DML-only and migrator credentials only
   in the migration job.
 - Set an explicit WebSocket origin allowlist; never use `*` in deployment.
-- Scale API, workers, and relays independently; test lease, quota, and provider
-  limits at expected peak concurrency.
+- Scale API, chat workers, security workers, and relays independently; test
+  lease, quota, clone, scan, and provider limits at expected peak concurrency.
 - Alert on readiness, outbox age/depth, retries, terminal failures, Redis
   disconnects, WebSocket counts, provider latency, and error rate.
 - Keep prompts, message content, bearer tokens, API keys, and raw provider
   errors out of logs and Redis notifications.
+- Keep Git hosts narrowly allowlisted; sandbox repository clones, enforce
+  outbound network controls, and never execute scanned source.
+- Protect webhook, GitHub, Slack, and Gemini secrets in a secret manager. If
+  security outputs are mandatory, replace best-effort delivery with a durable
+  outbox and alert on age and failures.
 - Add PostgreSQL row-level security if hostile tenants share a database; the
   current application and composite constraints enforce tenant scope, but RLS
   is an additional defense.

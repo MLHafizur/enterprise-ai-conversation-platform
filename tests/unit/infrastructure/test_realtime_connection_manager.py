@@ -13,7 +13,10 @@ from enterprise_chat_platform.domain.identifiers import UserId
 from enterprise_chat_platform.infrastructure.realtime.connection_manager import (
     RealtimeConnectionManager,
 )
-from enterprise_chat_platform.infrastructure.realtime.protocol import TerminalNotification
+from enterprise_chat_platform.infrastructure.realtime.protocol import (
+    CodeScanNotification,
+    TerminalNotification,
+)
 
 CONVERSATION_ID = UUID("33333333-3333-4333-8333-333333333333")
 
@@ -132,6 +135,45 @@ async def test_failed_send_removes_and_closes_connection() -> None:
     assert first_result is False
     assert second_result is False
     assert websocket.close_codes == [1012]
+
+
+@pytest.mark.asyncio
+async def test_code_scan_broadcast_requires_agent_or_admin_role() -> None:
+    manager = RealtimeConnectionManager()
+    agent_socket = _FakeWebSocket()
+    user_socket = _FakeWebSocket()
+    actor = _actor(
+        tenant_index=0,
+        user="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )
+    await manager.register(
+        connection_id="agent",
+        websocket=cast(WebSocket, agent_socket),
+        actor=actor,
+        tenant=DEMO_TENANTS[0],
+        roles=frozenset({"agent"}),
+    )
+    await manager.register(
+        connection_id="user",
+        websocket=cast(WebSocket, user_socket),
+        actor=actor,
+        tenant=DEMO_TENANTS[0],
+        roles=frozenset({"user"}),
+    )
+
+    await manager.broadcast_code_scan(
+        CodeScanNotification(
+            tenant_id=DEMO_TENANTS[0].id.value,
+            scan_id=UUID("66666666-6666-4666-8666-666666666666"),
+            status="succeeded",
+            gate_decision="review_required",
+            total_findings=1,
+            occurred_at=datetime(2026, 11, 16, 20, 0, tzinfo=UTC),
+        )
+    )
+
+    assert agent_socket.sent[0]["type"] == "code_scan.status.v1"
+    assert user_socket.sent == []
 
 
 @pytest.mark.asyncio

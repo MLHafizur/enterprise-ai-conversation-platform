@@ -5,6 +5,10 @@ import { toast } from 'react-toastify';
 import { getApiErrorMessage } from '../api';
 import { canManageAssistantProfiles } from '../assistantProfiles';
 import {
+  canManageCodeSecurity,
+  canReadCodeSecurity
+} from '../codeSecurity';
+import {
   createClientUuid,
   createConversation,
   fetchConversationSnapshot,
@@ -14,10 +18,14 @@ import { useAuth } from '../hooks/useAuth';
 import { useWebSocket } from '../hooks/useWebSocket';
 import ChatInterface from './ChatInterface';
 import AssistantProfileManager from './AssistantProfileManager';
+import CodeSecurityAnalysis from './CodeSecurityAnalysis';
+import CodeSecuritySettings from './CodeSecuritySettings';
 import ComplianceDashboard from './ComplianceDashboard';
 import ConnectionStatus from './ConnectionStatus';
 import { canReadGovernance } from '../governance';
 import HumanReviewQueue from './HumanReviewQueue';
+import SecurityDashboard from './SecurityDashboard';
+import SecurityRepositories from './SecurityRepositories';
 import Sidebar from './Sidebar';
 import TenantInfo from './TenantInfo';
 
@@ -30,6 +38,18 @@ const Dashboard = () => {
   const isChatRoute = dashboardPath === '/dashboard';
   const isComplianceRoute = dashboardPath === '/dashboard/compliance';
   const isProfilesRoute = dashboardPath === '/dashboard/profiles';
+  const isSecurityDashboardRoute = dashboardPath === '/dashboard/security';
+  const isSecurityAnalysisRoute =
+    dashboardPath === '/dashboard/security/analysis';
+  const isSecurityRepositoriesRoute =
+    dashboardPath === '/dashboard/security/repositories';
+  const isSecuritySettingsRoute =
+    dashboardPath === '/dashboard/security/settings';
+  const isSecurityRoute =
+    isSecurityDashboardRoute ||
+    isSecurityAnalysisRoute ||
+    isSecurityRepositoriesRoute ||
+    isSecuritySettingsRoute;
   const reviewDetailMatch = matchPath(
     '/dashboard/reviews/:agentRunId',
     dashboardPath
@@ -39,6 +59,8 @@ const Dashboard = () => {
   const selectedReviewId = reviewDetailMatch?.params.agentRunId || null;
   const canViewGovernance = canReadGovernance(user?.roles);
   const canManageProfiles = canManageAssistantProfiles(user?.roles);
+  const canViewCodeSecurity = canReadCodeSecurity(user?.roles);
+  const canManageSecurity = canManageCodeSecurity(user?.roles);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
@@ -129,7 +151,13 @@ const Dashboard = () => {
     await createNewConversation();
   }, [createNewConversation, navigate]);
 
-  if (!isChatRoute && !isComplianceRoute && !isReviewsRoute && !isProfilesRoute) {
+  if (
+    !isChatRoute &&
+    !isComplianceRoute &&
+    !isReviewsRoute &&
+    !isProfilesRoute &&
+    !isSecurityRoute
+  ) {
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -141,20 +169,34 @@ const Dashboard = () => {
     return <Navigate to="/dashboard" replace />;
   }
 
-  const activeView = isProfilesRoute
-    ? 'profiles'
-    : isComplianceRoute
-      ? 'compliance'
-      : isReviewsRoute
-        ? 'reviews'
-        : 'chat';
-  const pageTitle = isProfilesRoute
-    ? 'Assistant Profiles'
-    : isComplianceRoute
-      ? 'Governance Console'
-      : isReviewsRoute
-        ? 'Human Review'
-        : 'Enterprise Chat Agent';
+  if (isSecurityRoute && !canViewCodeSecurity) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  let activeView = 'chat';
+  let pageTitle = 'Enterprise Chat Agent';
+  if (isSecurityDashboardRoute) {
+    activeView = 'security';
+    pageTitle = 'Security Dashboard';
+  } else if (isSecurityAnalysisRoute) {
+    activeView = 'security-analysis';
+    pageTitle = 'Code Analysis';
+  } else if (isSecurityRepositoriesRoute) {
+    activeView = 'security-repositories';
+    pageTitle = 'Security Repositories';
+  } else if (isSecuritySettingsRoute) {
+    activeView = 'security-settings';
+    pageTitle = 'Security Settings';
+  } else if (isProfilesRoute) {
+    activeView = 'profiles';
+    pageTitle = 'Assistant Profiles';
+  } else if (isComplianceRoute) {
+    activeView = 'compliance';
+    pageTitle = 'Governance Console';
+  } else if (isReviewsRoute) {
+    activeView = 'reviews';
+    pageTitle = 'Human Review';
+  }
 
   return (
     <div className="flex h-screen min-w-[900px] bg-gray-100">
@@ -167,10 +209,19 @@ const Dashboard = () => {
         activeView={activeView}
         canViewGovernance={canViewGovernance}
         canManageProfiles={canManageProfiles}
+        canViewCodeSecurity={canViewCodeSecurity}
         onShowChat={() => navigate('/dashboard')}
         onShowCompliance={() => navigate('/dashboard/compliance')}
         onShowReviews={() => navigate('/dashboard/reviews')}
         onShowProfiles={() => navigate('/dashboard/profiles')}
+        onShowSecurityDashboard={() => navigate('/dashboard/security')}
+        onShowCodeAnalysis={() => navigate('/dashboard/security/analysis')}
+        onShowSecurityRepositories={() =>
+          navigate('/dashboard/security/repositories')
+        }
+        onShowSecuritySettings={() =>
+          navigate('/dashboard/security/settings')
+        }
         user={user}
         onLogout={logout}
       />
@@ -194,7 +245,18 @@ const Dashboard = () => {
         </header>
 
         <main className="flex-1 overflow-hidden">
-          {isProfilesRoute ? (
+          {isSecurityDashboardRoute ? (
+            <SecurityDashboard />
+          ) : isSecurityAnalysisRoute ? (
+            <CodeSecurityAnalysis canManage={canManageSecurity} />
+          ) : isSecurityRepositoriesRoute ? (
+            <SecurityRepositories
+              canScan={canViewCodeSecurity}
+              canManage={canManageSecurity}
+            />
+          ) : isSecuritySettingsRoute ? (
+            <CodeSecuritySettings canManage={canManageSecurity} />
+          ) : isProfilesRoute ? (
             <AssistantProfileManager />
           ) : isComplianceRoute ? (
             <ComplianceDashboard />

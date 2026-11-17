@@ -15,12 +15,14 @@ dependencies = [
     "pydantic>=2.14.3",
     "pydantic-settings>=2.16.2",
     "pyjwt[crypto]>=2.15,<3",
+    "python-multipart>=0.0.20,<1",
     "redis>=5,<8",
     "sqlalchemy[asyncio]>=2.1.8",
     "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]
+enterprise-code-security-worker = "enterprise_chat_platform.code_security_worker:main"
 enterprise-chat-relay = "enterprise_chat_platform.relay:main"
 enterprise-chat-worker = "enterprise_chat_platform.worker:main"
 

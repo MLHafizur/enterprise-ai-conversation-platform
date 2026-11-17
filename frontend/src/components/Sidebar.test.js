@@ -6,6 +6,7 @@ import Sidebar from './Sidebar';
 const renderSidebar = ({
   canViewGovernance = false,
   canManageProfiles = false,
+  canViewCodeSecurity = false,
   activeView = 'chat'
 } = {}) =>
   renderToStaticMarkup(
@@ -18,10 +19,15 @@ const renderSidebar = ({
       activeView={activeView}
       canViewGovernance={canViewGovernance}
       canManageProfiles={canManageProfiles}
+      canViewCodeSecurity={canViewCodeSecurity}
       onShowChat={() => {}}
       onShowCompliance={() => {}}
       onShowReviews={() => {}}
       onShowProfiles={() => {}}
+      onShowSecurityDashboard={() => {}}
+      onShowCodeAnalysis={() => {}}
+      onShowSecurityRepositories={() => {}}
+      onShowSecuritySettings={() => {}}
       user={{ name: 'Reviewer', tenant_id: 'tenant-a' }}
       onLogout={() => {}}
     />
@@ -66,5 +72,31 @@ describe('Sidebar governance navigation', () => {
     });
 
     expect(view).toMatch(/aria-current="page"[^>]*>.*Assistant profiles/s);
+  });
+
+  test('shows every secure-code screen to an authorized reader', () => {
+    const view = renderSidebar({ canViewCodeSecurity: true });
+
+    expect(view).toContain('Security dashboard');
+    expect(view).toContain('Code analysis');
+    expect(view).toContain('Repositories');
+    expect(view).toContain('Security settings');
+  });
+
+  test('hides secure-code routes from an ordinary user', () => {
+    const view = renderSidebar();
+
+    expect(view).not.toContain('Security dashboard');
+    expect(view).not.toContain('Code analysis');
+    expect(view).not.toContain('Security settings');
+  });
+
+  test('marks the active secure-code route', () => {
+    const view = renderSidebar({
+      canViewCodeSecurity: true,
+      activeView: 'security-analysis'
+    });
+
+    expect(view).toMatch(/aria-current="page"[^>]*>.*Code analysis/s);
   });
 });

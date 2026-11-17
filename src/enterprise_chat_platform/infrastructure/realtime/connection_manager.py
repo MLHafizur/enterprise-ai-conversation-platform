@@ -10,7 +10,10 @@ from fastapi import WebSocket
 
 from enterprise_chat_platform.application.accept_user_turn import ActorContext
 from enterprise_chat_platform.application.tenant_catalog import TenantDefinition
-from enterprise_chat_platform.infrastructure.realtime.protocol import TerminalNotification
+from enterprise_chat_platform.infrastructure.realtime.protocol import (
+    CodeScanNotification,
+    TerminalNotification,
+)
 
 
 @dataclass(slots=True)
@@ -18,6 +21,7 @@ class _Connection:
     websocket: WebSocket
     actor: ActorContext
     tenant: TenantDefinition
+    roles: frozenset[str]
     subscriptions: set[UUID] = field(default_factory=set)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -37,6 +41,7 @@ class RealtimeConnectionManager:
         websocket: WebSocket,
         actor: ActorContext,
         tenant: TenantDefinition,
+        roles: frozenset[str] = frozenset(),
     ) -> None:
         async with self._lock:
             if connection_id in self._connections:
@@ -45,6 +50,7 @@ class RealtimeConnectionManager:
                 websocket=websocket,
                 actor=actor,
                 tenant=tenant,
+                roles=roles,
             )
 
     async def unregister(self, connection_id: str) -> None:
@@ -87,6 +93,28 @@ class RealtimeConnectionManager:
         if not recipients:
             return
 
+        await asyncio.gather(
+            *(
+                self._send_or_remove(
+                    connection_id=connection_id,
+                    connection=connection,
+                    payload=notification.websocket_payload(),
+                )
+                for connection_id, connection in recipients
+            )
+        )
+
+    async def broadcast_code_scan(self, notification: CodeScanNotification) -> None:
+        """Send tenant-safe scan metadata only to agent/admin principals."""
+        async with self._lock:
+            recipients = [
+                (connection_id, connection)
+                for connection_id, connection in self._connections.items()
+                if connection.tenant.id.value == notification.tenant_id
+                and connection.roles.intersection({"agent", "admin"})
+            ]
+        if not recipients:
+            return
         await asyncio.gather(
             *(
                 self._send_or_remove(

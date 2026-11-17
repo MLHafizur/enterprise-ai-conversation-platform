@@ -20,6 +20,12 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Repository scans invoke the Git CLI with an allowlisted HTTPS URL, shallow
+# fetches, disabled credential prompts, and worker-level time/size ceilings.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system --gid 10001 chat \
     && useradd --system --uid 10001 --gid chat --home-dir /nonexistent chat
 

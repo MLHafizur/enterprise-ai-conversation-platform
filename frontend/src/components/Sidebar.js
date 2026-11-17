@@ -3,7 +3,10 @@ import {
   ArrowRightOnRectangleIcon,
   ChatBubbleLeftRightIcon,
   ChatBubbleLeftIcon,
+  CodeBracketSquareIcon,
+  Cog6ToothIcon,
   ClipboardDocumentCheckIcon,
+  FolderOpenIcon,
   PlusIcon,
   ShieldCheckIcon,
   SparklesIcon,
@@ -25,10 +28,15 @@ const Sidebar = ({
   activeView,
   canViewGovernance,
   canManageProfiles,
+  canViewCodeSecurity,
   onShowChat,
   onShowCompliance,
   onShowReviews,
   onShowProfiles,
+  onShowSecurityDashboard,
+  onShowCodeAnalysis,
+  onShowSecurityRepositories,
+  onShowSecuritySettings,
   user,
   onLogout
 }) => (
@@ -94,6 +102,65 @@ const Sidebar = ({
           <SparklesIcon className="h-5 w-5 mr-3" aria-hidden="true" />
           Assistant profiles
         </button>
+      )}
+      {canViewCodeSecurity && (
+        <>
+          <div className="px-3 pb-1 pt-4 text-xs font-semibold uppercase tracking-wide text-gray-400">
+            Secure code
+          </div>
+          <button
+            type="button"
+            onClick={onShowSecurityDashboard}
+            aria-current={activeView === 'security' ? 'page' : undefined}
+            className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeView === 'security'
+                ? 'bg-indigo-50 text-indigo-700'
+                : 'text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <ShieldCheckIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+            Security dashboard
+          </button>
+          <button
+            type="button"
+            onClick={onShowCodeAnalysis}
+            aria-current={activeView === 'security-analysis' ? 'page' : undefined}
+            className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeView === 'security-analysis'
+                ? 'bg-indigo-50 text-indigo-700'
+                : 'text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <CodeBracketSquareIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+            Code analysis
+          </button>
+          <button
+            type="button"
+            onClick={onShowSecurityRepositories}
+            aria-current={activeView === 'security-repositories' ? 'page' : undefined}
+            className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeView === 'security-repositories'
+                ? 'bg-indigo-50 text-indigo-700'
+                : 'text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <FolderOpenIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+            Repositories
+          </button>
+          <button
+            type="button"
+            onClick={onShowSecuritySettings}
+            aria-current={activeView === 'security-settings' ? 'page' : undefined}
+            className={`w-full flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              activeView === 'security-settings'
+                ? 'bg-indigo-50 text-indigo-700'
+                : 'text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <Cog6ToothIcon className="h-5 w-5 mr-3" aria-hidden="true" />
+            Security settings
+          </button>
+        </>
       )}
     </nav>
 

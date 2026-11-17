@@ -149,6 +149,36 @@ class Settings(_BaseSettings):
     )
     gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
 
+    # Day 10 secure-code-analysis bounded context. Repository ingestion runs in
+    # its own leased worker because cloning and AST analysis must never block an
+    # API request or share the chat worker's provider budget.
+    code_security_enabled: bool = True
+    code_security_ai_mode: Literal["disabled", "echo", "gemini"] = "echo"
+    code_security_webhook_secret: SecretStr | None = None
+    code_security_allowed_git_hosts: str = "github.com"
+    code_security_clone_timeout_seconds: int = Field(default=30, ge=1, le=600)
+    code_security_scan_timeout_seconds: int = Field(default=120, ge=2, le=3600)
+    code_security_worker_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
+    code_security_worker_lease_seconds: int = Field(default=900, ge=3, le=7200)
+    code_security_worker_max_attempts: int = Field(default=3, ge=1, le=20)
+    code_security_worker_initial_backoff_seconds: float = Field(default=2, gt=0, le=3600)
+    code_security_worker_max_backoff_seconds: float = Field(default=60, gt=0, le=86_400)
+    code_security_max_file_size_bytes: int = Field(
+        default=10_485_760,
+        ge=1_024,
+        le=10_485_760,
+    )
+    code_security_max_repository_files: int = Field(default=2_000, ge=1, le=100_000)
+    code_security_max_repository_bytes: int = Field(
+        default=52_428_800,
+        ge=1_048_576,
+        le=1_073_741_824,
+    )
+    code_security_max_findings_per_scan: int = Field(default=10_000, ge=1, le=10_000)
+    code_security_github_token: SecretStr | None = None
+    code_security_github_api_base_url: str = "https://api.github.com"
+    code_security_slack_webhook_url: SecretStr | None = None
+
     @property
     def allowed_websocket_origins(self) -> frozenset[str]:
         """Return the normalized origin allowlist used during WS upgrades."""
@@ -156,6 +186,15 @@ class Settings(_BaseSettings):
             origin.strip().rstrip("/")
             for origin in self.websocket_allowed_origins.split(",")
             if origin.strip()
+        )
+
+    @property
+    def allowed_code_repository_hosts(self) -> frozenset[str]:
+        """Return normalized HTTPS Git hosts that repository jobs may contact."""
+        return frozenset(
+            host.strip().lower().rstrip(".")
+            for host in self.code_security_allowed_git_hosts.split(",")
+            if host.strip()
         )
 
     @staticmethod
@@ -245,6 +284,60 @@ class Settings(_BaseSettings):
                 raise ValueError("Gemini API key is required when Gemini is enabled")
             if not self.gemini_api_base_url.startswith("https://"):
                 raise ValueError("Gemini API base URL must use HTTPS")
+
+        if self.code_security_enabled and not self.allowed_code_repository_hosts:
+            raise ValueError("Code security requires at least one allowed Git host")
+        for host in self.allowed_code_repository_hosts:
+            if (
+                host == "*"
+                or ":" in host
+                or "/" in host
+                or host.startswith(".")
+                or host.endswith(".")
+                or any(
+                    not label or not label.replace("-", "").isalnum() for label in host.split(".")
+                )
+            ):
+                raise ValueError("Allowed Git hosts must be explicit DNS hostnames")
+
+        # A pull-request scan may need bounded history deepening before a merge
+        # base exists. Budget every Git subprocess timeout, the analyzer, the
+        # optional advisory provider, and a small commit/notification margin.
+        worst_case_scan_seconds = (
+            self.code_security_scan_timeout_seconds
+            + (20 * self.code_security_clone_timeout_seconds)
+            + self.provider_timeout_seconds
+            + 30
+        )
+        if self.code_security_worker_lease_seconds <= worst_case_scan_seconds:
+            raise ValueError(
+                "Code security worker lease must exceed its complete repository operation budget"
+            )
+        if (
+            self.code_security_worker_max_backoff_seconds
+            < self.code_security_worker_initial_backoff_seconds
+        ):
+            raise ValueError(
+                "Code security worker maximum backoff cannot be shorter than initial backoff"
+            )
+
+        if self.code_security_ai_mode == "gemini":
+            if self.gemini_api_key is None or not self.gemini_api_key.get_secret_value().strip():
+                raise ValueError("Gemini API key is required for code security AI")
+            if not self.gemini_api_base_url.startswith("https://"):
+                raise ValueError("Gemini API base URL must use HTTPS")
+
+        if self.code_security_webhook_secret is not None:
+            webhook_secret = self.code_security_webhook_secret.get_secret_value()
+            if len(webhook_secret) < 32:
+                raise ValueError("Code security webhook secret must contain at least 32 characters")
+
+        if not self.code_security_github_api_base_url.startswith("https://"):
+            raise ValueError("GitHub API base URL must use HTTPS")
+        if self.code_security_slack_webhook_url is not None:
+            slack_url = self.code_security_slack_webhook_url.get_secret_value()
+            if slack_url and not slack_url.startswith("https://hooks.slack.com/"):
+                raise ValueError("Slack webhook URL must use the official HTTPS endpoint")
 
         return self
 
