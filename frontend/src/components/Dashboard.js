@@ -1,9 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Bars3Icon } from '@heroicons/react/24/outline';
 import { matchPath, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 
 import { getApiErrorMessage } from '../api';
 import { canManageAssistantProfiles } from '../assistantProfiles';
+import {
+  canManageCodeSecurity,
+  canReadCodeSecurity
+} from '../codeSecurity';
 import {
   createClientUuid,
   createConversation,
@@ -14,10 +19,14 @@ import { useAuth } from '../hooks/useAuth';
 import { useWebSocket } from '../hooks/useWebSocket';
 import ChatInterface from './ChatInterface';
 import AssistantProfileManager from './AssistantProfileManager';
+import CodeSecurityAnalysis from './CodeSecurityAnalysis';
+import CodeSecuritySettings from './CodeSecuritySettings';
 import ComplianceDashboard from './ComplianceDashboard';
 import ConnectionStatus from './ConnectionStatus';
 import { canReadGovernance } from '../governance';
 import HumanReviewQueue from './HumanReviewQueue';
+import SecurityDashboard from './SecurityDashboard';
+import SecurityRepositories from './SecurityRepositories';
 import Sidebar from './Sidebar';
 import TenantInfo from './TenantInfo';
 
@@ -30,6 +39,18 @@ const Dashboard = () => {
   const isChatRoute = dashboardPath === '/dashboard';
   const isComplianceRoute = dashboardPath === '/dashboard/compliance';
   const isProfilesRoute = dashboardPath === '/dashboard/profiles';
+  const isSecurityDashboardRoute = dashboardPath === '/dashboard/security';
+  const isSecurityAnalysisRoute =
+    dashboardPath === '/dashboard/security/analysis';
+  const isSecurityRepositoriesRoute =
+    dashboardPath === '/dashboard/security/repositories';
+  const isSecuritySettingsRoute =
+    dashboardPath === '/dashboard/security/settings';
+  const isSecurityRoute =
+    isSecurityDashboardRoute ||
+    isSecurityAnalysisRoute ||
+    isSecurityRepositoriesRoute ||
+    isSecuritySettingsRoute;
   const reviewDetailMatch = matchPath(
     '/dashboard/reviews/:agentRunId',
     dashboardPath
@@ -39,10 +60,13 @@ const Dashboard = () => {
   const selectedReviewId = reviewDetailMatch?.params.agentRunId || null;
   const canViewGovernance = canReadGovernance(user?.roles);
   const canManageProfiles = canManageAssistantProfiles(user?.roles);
+  const canViewCodeSecurity = canReadCodeSecurity(user?.roles);
+  const canManageSecurity = canManageCodeSecurity(user?.roles);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [creatingConversation, setCreatingConversation] = useState(false);
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const creatingRef = useRef(false);
   const initializedRef = useRef(false);
 
@@ -129,7 +153,21 @@ const Dashboard = () => {
     await createNewConversation();
   }, [createNewConversation, navigate]);
 
-  if (!isChatRoute && !isComplianceRoute && !isReviewsRoute && !isProfilesRoute) {
+  const closeMobileNavigation = useCallback(() => {
+    setMobileNavigationOpen(false);
+  }, []);
+
+  useEffect(() => {
+    closeMobileNavigation();
+  }, [closeMobileNavigation, dashboardPath]);
+
+  if (
+    !isChatRoute &&
+    !isComplianceRoute &&
+    !isReviewsRoute &&
+    !isProfilesRoute &&
+    !isSecurityRoute
+  ) {
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -141,23 +179,37 @@ const Dashboard = () => {
     return <Navigate to="/dashboard" replace />;
   }
 
-  const activeView = isProfilesRoute
-    ? 'profiles'
-    : isComplianceRoute
-      ? 'compliance'
-      : isReviewsRoute
-        ? 'reviews'
-        : 'chat';
-  const pageTitle = isProfilesRoute
-    ? 'Assistant Profiles'
-    : isComplianceRoute
-      ? 'Governance Console'
-      : isReviewsRoute
-        ? 'Human Review'
-        : 'Enterprise Chat Agent';
+  if (isSecurityRoute && !canViewCodeSecurity) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  let activeView = 'chat';
+  let pageTitle = 'Enterprise Chat Agent';
+  if (isSecurityDashboardRoute) {
+    activeView = 'security';
+    pageTitle = 'Security Dashboard';
+  } else if (isSecurityAnalysisRoute) {
+    activeView = 'security-analysis';
+    pageTitle = 'Code Analysis';
+  } else if (isSecurityRepositoriesRoute) {
+    activeView = 'security-repositories';
+    pageTitle = 'Security Repositories';
+  } else if (isSecuritySettingsRoute) {
+    activeView = 'security-settings';
+    pageTitle = 'Security Settings';
+  } else if (isProfilesRoute) {
+    activeView = 'profiles';
+    pageTitle = 'Assistant Profiles';
+  } else if (isComplianceRoute) {
+    activeView = 'compliance';
+    pageTitle = 'Governance Console';
+  } else if (isReviewsRoute) {
+    activeView = 'reviews';
+    pageTitle = 'Human Review';
+  }
 
   return (
-    <div className="flex h-screen min-w-[900px] bg-gray-100">
+    <div className="flex h-screen min-w-0 overflow-hidden bg-gray-100 supports-[height:100dvh]:h-[100dvh]">
       <Sidebar
         conversations={conversations}
         selectedConversation={selectedConversation}
@@ -167,19 +219,40 @@ const Dashboard = () => {
         activeView={activeView}
         canViewGovernance={canViewGovernance}
         canManageProfiles={canManageProfiles}
+        canViewCodeSecurity={canViewCodeSecurity}
         onShowChat={() => navigate('/dashboard')}
         onShowCompliance={() => navigate('/dashboard/compliance')}
         onShowReviews={() => navigate('/dashboard/reviews')}
         onShowProfiles={() => navigate('/dashboard/profiles')}
+        onShowSecurityDashboard={() => navigate('/dashboard/security')}
+        onShowCodeAnalysis={() => navigate('/dashboard/security/analysis')}
+        onShowSecurityRepositories={() =>
+          navigate('/dashboard/security/repositories')
+        }
+        onShowSecuritySettings={() =>
+          navigate('/dashboard/security/settings')
+        }
+        mobileOpen={mobileNavigationOpen}
+        onMobileClose={closeMobileNavigation}
         user={user}
         onLogout={logout}
       />
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex min-w-0 flex-1 flex-col">
         <header className="bg-white shadow-sm border-b border-gray-200">
-          <div className="flex items-center justify-between px-6 py-4">
-            <div className="flex items-center space-x-4">
-              <h1 className="text-xl font-semibold text-gray-900">
+          <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
+            <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+              <button
+                aria-controls="mobile-workspace-sidebar"
+                aria-expanded={mobileNavigationOpen}
+                aria-label="Open workspace navigation"
+                className="shrink-0 rounded-md p-2 text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 lg:hidden"
+                onClick={() => setMobileNavigationOpen(true)}
+                type="button"
+              >
+                <Bars3Icon aria-hidden="true" className="h-6 w-6" />
+              </button>
+              <h1 className="truncate text-lg font-semibold text-gray-900 sm:text-xl">
                 {pageTitle}
               </h1>
               {isChatRoute && (
@@ -189,12 +262,25 @@ const Dashboard = () => {
                 />
               )}
             </div>
-            <TenantInfo user={user} />
+            <div className="hidden shrink-0 sm:block">
+              <TenantInfo user={user} />
+            </div>
           </div>
         </header>
 
         <main className="flex-1 overflow-hidden">
-          {isProfilesRoute ? (
+          {isSecurityDashboardRoute ? (
+            <SecurityDashboard />
+          ) : isSecurityAnalysisRoute ? (
+            <CodeSecurityAnalysis canManage={canManageSecurity} />
+          ) : isSecurityRepositoriesRoute ? (
+            <SecurityRepositories
+              canScan={canViewCodeSecurity}
+              canManage={canManageSecurity}
+            />
+          ) : isSecuritySettingsRoute ? (
+            <CodeSecuritySettings canManage={canManageSecurity} />
+          ) : isProfilesRoute ? (
             <AssistantProfileManager />
           ) : isComplianceRoute ? (
             <ComplianceDashboard />

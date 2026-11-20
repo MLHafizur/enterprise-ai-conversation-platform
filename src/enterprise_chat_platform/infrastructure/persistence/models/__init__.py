@@ -10,6 +10,13 @@ from enterprise_chat_platform.infrastructure.persistence.models.assistant_profil
     AssistantProfileVersionRecord,
     TenantAssistantProfileAssignmentRecord,
 )
+from enterprise_chat_platform.infrastructure.persistence.models.code_security import (
+    CodeRepositoryRecord,
+    CodeScanRecord,
+    CodeScanReviewRecord,
+    CodeSecurityFindingRecord,
+    CodeSecuritySettingsRecord,
+)
 from enterprise_chat_platform.infrastructure.persistence.models.conversation import (
     ConversationRecord,
 )
@@ -38,6 +45,11 @@ def registered_model_metadata() -> MetaData:
 __all__ = [
     "AgentRunRecord",
     "AssistantProfileVersionRecord",
+    "CodeRepositoryRecord",
+    "CodeScanRecord",
+    "CodeScanReviewRecord",
+    "CodeSecurityFindingRecord",
+    "CodeSecuritySettingsRecord",
     "ConversationRecord",
     "IdempotencyReceiptRecord",
     "HumanReviewRecord",

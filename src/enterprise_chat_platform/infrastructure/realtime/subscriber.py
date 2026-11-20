@@ -13,7 +13,10 @@ from redis.exceptions import RedisError
 from enterprise_chat_platform.infrastructure.realtime.connection_manager import (
     RealtimeConnectionManager,
 )
-from enterprise_chat_platform.infrastructure.realtime.protocol import TerminalNotification
+from enterprise_chat_platform.infrastructure.realtime.protocol import (
+    CodeScanNotification,
+    realtime_notification_adapter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +91,7 @@ class RealtimeNotificationSubscriber:
             return
 
         try:
-            notification = TerminalNotification.model_validate_json(raw_data)
+            notification = realtime_notification_adapter.validate_json(raw_data)
         except ValidationError:
             logger.warning("discarded invalid realtime notification")
             return
@@ -100,4 +103,7 @@ class RealtimeNotificationSubscriber:
             logger.warning("discarded mismatched realtime notification")
             return
 
-        await self._manager.broadcast(notification)
+        if isinstance(notification, CodeScanNotification):
+            await self._manager.broadcast_code_scan(notification)
+        else:
+            await self._manager.broadcast(notification)

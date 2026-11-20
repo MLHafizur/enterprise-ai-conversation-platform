@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from enterprise_chat_platform.infrastructure.realtime.protocol import (
     AuthenticateFrame,
+    CodeScanNotification,
     HeartbeatFrame,
     SubscribeFrame,
     TerminalNotification,
@@ -80,3 +81,22 @@ def test_terminal_notification_websocket_payload_excludes_tenant_routing_data() 
     assert payload["conversation_id"] == str(CONVERSATION_ID)
     assert "tenant_id" not in payload
     assert "content" not in payload
+
+
+def test_code_scan_notification_contains_only_safe_status_metadata() -> None:
+    notification = CodeScanNotification(
+        tenant_id=UUID("22222222-2222-4222-8222-222222222222"),
+        scan_id=UUID("66666666-6666-4666-8666-666666666666"),
+        status="succeeded",
+        gate_decision="block",
+        total_findings=3,
+        occurred_at=datetime(2026, 11, 16, 20, 0, tzinfo=UTC),
+    )
+
+    payload = notification.websocket_payload()
+
+    assert payload["type"] == "code_scan.status.v1"
+    assert payload["gate_decision"] == "block"
+    assert "tenant_id" not in payload
+    assert "code" not in payload
+    assert "findings" not in payload

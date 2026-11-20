@@ -92,6 +92,7 @@ async def realtime_websocket(websocket: WebSocket, client_connection_id: str) ->
             websocket=websocket,
             actor=principal.actor,
             tenant=tenant,
+            roles=principal.roles,
         )
         snapshot = await realtime.tenant_service.quota_snapshot(tenant=tenant)
         if not await realtime.connection_manager.send(

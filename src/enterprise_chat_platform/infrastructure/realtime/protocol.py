@@ -55,3 +55,25 @@ class TerminalNotification(_StrictFrame):
     def websocket_payload(self) -> dict[str, object]:
         """Exclude tenant routing data before sending to an authenticated browser."""
         return self.model_dump(mode="json", exclude={"tenant_id"})
+
+
+class CodeScanNotification(_StrictFrame):
+    """Content-free scan progress delivered only to governance roles."""
+
+    type: Literal["code_scan.status.v1"] = "code_scan.status.v1"
+    tenant_id: UUID
+    scan_id: UUID
+    status: Literal["succeeded", "failed"]
+    gate_decision: Literal["approve", "review_required", "block"] | None
+    total_findings: int = Field(ge=0)
+    occurred_at: datetime
+
+    def websocket_payload(self) -> dict[str, object]:
+        return self.model_dump(mode="json", exclude={"tenant_id"})
+
+
+RealtimeNotification = Annotated[
+    TerminalNotification | CodeScanNotification,
+    Field(discriminator="type"),
+]
+realtime_notification_adapter = TypeAdapter(RealtimeNotification)

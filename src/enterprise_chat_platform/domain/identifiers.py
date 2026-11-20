@@ -73,6 +73,30 @@ class AssistantProfileId(_UUIDIdentifier):
     __slots__ = ()
 
 
+class CodeRepositoryId(_UUIDIdentifier):
+    """Uniquely identifies a tenant-scoped source-code repository."""
+
+    __slots__ = ()
+
+
+class CodeScanId(_UUIDIdentifier):
+    """Uniquely identifies one immutable code-analysis attempt."""
+
+    __slots__ = ()
+
+
+class SecurityFindingId(_UUIDIdentifier):
+    """Uniquely identifies one deduplicated security finding."""
+
+    __slots__ = ()
+
+
+class SecurityReviewId(_UUIDIdentifier):
+    """Uniquely identifies a human review of security findings."""
+
+    __slots__ = ()
+
+
 class EventId(_UUIDIdentifier):
     """Uniquely identifiers an application or integration event."""
 

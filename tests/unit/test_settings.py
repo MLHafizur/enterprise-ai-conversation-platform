@@ -400,3 +400,38 @@ def test_invalid_redis_url_is_rejected_without_exposing_credentials() -> None:
     rendered_error = str(captured_error.value)
     assert "Redis URL must be a valid URL" in rendered_error
     assert secret not in rendered_error
+
+
+def test_code_security_webhook_secret_requires_adequate_entropy_budget() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="webhook secret must contain at least 32 characters",
+    ):
+        Settings(
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            code_security_webhook_secret=SecretStr("too-short"),
+            _env_file=None,
+        )
+
+
+def test_code_security_lease_covers_git_and_analysis_timeouts() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="complete repository operation budget",
+    ):
+        Settings(
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            code_security_clone_timeout_seconds=30,
+            code_security_scan_timeout_seconds=120,
+            code_security_worker_lease_seconds=240,
+            _env_file=None,
+        )
+
+
+def test_code_security_findings_limit_matches_the_persistence_and_ui_contract() -> None:
+    with pytest.raises(ValidationError, match="less than or equal to 10000"):
+        Settings(
+            database_url=SecretStr(RUNTIME_DATABASE_URL),
+            code_security_max_findings_per_scan=10_001,
+            _env_file=None,
+        )
